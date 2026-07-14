@@ -1,0 +1,19 @@
+{
+  "name": "EduBranch - Quản lý chi nhánh, giáo viên và lịch dạy",
+  "short_name": "EduBranch",
+  "description": "Quản lý chi nhánh, môn học, tài khoản giáo viên, lương và thời khóa biểu.",
+  "lang": "vi",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f7f6f2",
+  "theme_color": "#2d6a4f",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

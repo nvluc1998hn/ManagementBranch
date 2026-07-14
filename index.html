@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+<title>EduBranch - Quản lý chi nhánh, giáo viên và lịch dạy</title>
+<meta name="description" content="EduBranch giúp trung tâm quản lý chi nhánh, môn học, tài khoản giáo viên, lương và thời khóa biểu; giáo viên tự cập nhật trạng thái ca dạy.">
+<meta name="author" content="EduBranch">
+<meta name="theme-color" content="#2d6a4f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="EduBranch">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+<link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600&family=Playfair+Display:wght@500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app-layout">
+  <!-- Sidebar -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-logo">
+      <span class="logo-icon"><i class="ti ti-building-community"></i></span>
+      <span class="logo-text">EduBranch</span>
+    </div>
+    <nav class="sidebar-nav">
+      <a href="#" class="nav-item active" data-page="dashboard">
+        <i class="ti ti-layout-dashboard"></i><span>Tổng quan</span>
+      </a>
+      <a href="#" class="nav-item nav-admin" data-page="branches">
+        <i class="ti ti-building-community"></i><span>Chi nhánh</span>
+      </a>
+      <a href="#" class="nav-item nav-admin" data-page="teachers">
+        <i class="ti ti-users"></i><span>Giáo viên</span>
+      </a>
+      <a href="#" class="nav-item" data-page="schedule">
+        <i class="ti ti-calendar-time"></i><span>Thời khóa biểu</span>
+      </a>
+      <a href="#" class="nav-item" data-page="report">
+        <i class="ti ti-chart-bar"></i><span>Báo cáo</span>
+      </a>
+      <a href="#" class="nav-item" data-page="account">
+        <i class="ti ti-user-circle"></i><span>Tài khoản</span>
+      </a>
+    </nav>
+  </aside>
+
+  <!-- Main -->
+  <main class="main-content">
+    <header class="topbar">
+      <button class="menu-btn" id="menuBtn"><i class="ti ti-menu-2"></i></button>
+      <div class="topbar-title" id="topbarTitle">Tổng quan</div>
+      <div class="topbar-right">
+        <span class="topbar-date" id="topbarDate"></span>
+      </div>
+    </header>
+
+    <div class="page-content" id="pageContent"></div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal" id="modal">
+    <div class="modal-header">
+      <h3 id="modalTitle"></h3>
+      <button class="modal-close" onclick="closeModal()"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="modal-body" id="modalBody"></div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Sidebar overlay (mobile) -->
+<div class="sidebar-overlay" id="sidebarOverlay"></div>
+
+<!-- Bottom nav for mobile -->
+<nav class="bottom-nav" id="bottomNav">
+  <a href="#" class="bottom-nav-item active" data-page="dashboard">
+    <i class="ti ti-layout-dashboard"></i><span>Tổng quan</span>
+  </a>
+  <a href="#" class="bottom-nav-item" data-page="schedule">
+    <i class="ti ti-calendar-time"></i><span>Lịch dạy</span>
+  </a>
+  <a href="#" class="bottom-nav-item" data-page="report">
+    <i class="ti ti-chart-bar"></i><span>Báo cáo</span>
+  </a>
+  <a href="#" class="bottom-nav-item" data-page="more">
+    <i class="ti ti-dots"></i><span>Thêm</span>
+  </a>
+</nav>
+
+<!-- More menu drawer -->
+<div class="more-drawer" id="moreDrawer">
+  <div class="more-drawer-inner">
+    <a href="#" class="more-drawer-item nav-admin" data-page="branches"><i class="ti ti-building-community"></i> Chi nhánh</a>
+    <a href="#" class="more-drawer-item nav-admin" data-page="teachers"><i class="ti ti-users"></i> Giáo viên</a>
+    <a href="#" class="more-drawer-item" data-page="account"><i class="ti ti-user-circle"></i> Tài khoản</a>
+  </div>
+</div>
+<div class="more-drawer-overlay" id="moreDrawerOverlay"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').catch(() => {});
+  }
+</script>
+</body>
+</html>
