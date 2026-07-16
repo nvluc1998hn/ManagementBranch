@@ -113,6 +113,32 @@ function readPhoneField(id) {
   return v;
 }
 
+// ---- MONEY FIELD (hiển thị dấu chấm phân cách hàng nghìn, lưu số nguyên) ----
+function formatMoneyInputValue(value) {
+  const digits = String(value ?? "").replace(/\D/g, "").replace(/^0+(?=\d)/, "");
+  return digits ? digits.replace(/\B(?=(\d{3})+(?!\d))/g, ".") : "";
+}
+
+function moneyInput(el) {
+  const original = el.value;
+  const caret = el.selectionStart ?? original.length;
+  const digitsBeforeCaret = original.slice(0, caret).replace(/\D/g, "").length;
+  el.value = formatMoneyInputValue(original);
+  let pos = 0;
+  let seen = 0;
+  while (pos < el.value.length && seen < digitsBeforeCaret) {
+    if (/\d/.test(el.value[pos])) seen++;
+    pos++;
+  }
+  try { el.setSelectionRange(pos, pos); } catch (_) {}
+}
+
+function readMoneyInput(inputOrId) {
+  const el = typeof inputOrId === "string" ? document.getElementById(inputOrId) : inputOrId;
+  const digits = String(el?.value || "").replace(/\D/g, "");
+  return digits ? Number(digits) : null;
+}
+
 // ============================================================
 // STARTUP
 // ============================================================
@@ -204,6 +230,10 @@ function closeSidebar() {
   document.getElementById("sidebarOverlay")?.classList.remove("show");
 }
 
+function toggleReportNav() {
+  document.getElementById("reportNavGroup")?.classList.toggle("open");
+}
+
 function bindNav() {
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.addEventListener("click", (e) => {
@@ -265,11 +295,14 @@ const PAGE_TITLES = {
   branches: "Chi nhánh",
   teachers: "Giáo viên",
   schedule: "Thời khóa biểu",
-  report: "Báo cáo",
+  "report-branch": "Báo cáo theo chi nhánh",
+  "report-teacher": "Báo cáo theo giáo viên",
+  "salary-adjustments": "Phụ cấp & khấu trừ",
+  "report-salary": "Báo cáo lương",
   account: "Tài khoản",
 };
 
-const ADMIN_ONLY_PAGES = ["branches", "teachers"];
+const ADMIN_ONLY_PAGES = ["branches", "teachers", "salary-adjustments", "report-branch"];
 
 function renderPage(page) {
   if (!getCurrentUser()) {
@@ -278,6 +311,9 @@ function renderPage(page) {
   }
   document.getElementById("moreDrawer")?.classList.remove("open");
   document.getElementById("moreDrawerOverlay")?.classList.remove("show");
+
+  if (page === "report") page = isAdmin() ? "report-branch" : "report-teacher";
+  if (page === "report-adjustments") page = "salary-adjustments";
 
   if (ADMIN_ONLY_PAGES.includes(page) && !isAdmin()) {
     showToast("Chỉ quản trị viên mới truy cập được trang này", "error");
@@ -290,19 +326,97 @@ function renderPage(page) {
   document.querySelectorAll(".nav-item").forEach((n) => {
     n.classList.toggle("active", n.dataset.page === page);
   });
-  const morePages = ["branches", "teachers", "account"];
+  const reportPages = ["report-branch", "report-teacher", "report-salary"];
+  const reportNavGroup = document.getElementById("reportNavGroup");
+  reportNavGroup?.classList.toggle("active", reportPages.includes(page));
+  if (reportPages.includes(page)) reportNavGroup?.classList.add("open");
+  const morePages = ["branches", "teachers", "salary-adjustments", "account"];
   document.querySelectorAll(".bottom-nav-item").forEach((n) => {
     n.classList.toggle(
       "active",
-      n.dataset.page === page || (n.dataset.page === "more" && morePages.includes(page)),
+      n.dataset.page === page ||
+        (n.dataset.page === "report" && reportPages.includes(page)) ||
+        (n.dataset.page === "more" && morePages.includes(page)),
     );
   });
 
   const el = document.getElementById("pageContent");
   el.innerHTML = "";
-  const pages = { dashboard, branches, teachers, schedule, report, account };
+  const pages = {
+    dashboard, branches, teachers, schedule, account,
+    "report-branch": () => report("branch"),
+    "report-teacher": () => report("teacher"),
+    "salary-adjustments": salaryAdjustmentsPage,
+    "report-salary": () => report("salary"),
+  };
   const fn = pages[page];
   el.innerHTML = fn ? fn() : `<div class="empty-state"><p>Không tìm thấy trang</p></div>`;
+
+  if (page === "schedule" && !isAdmin()) maybeShowTodayScheduleNotice();
+}
+
+let scheduleNoticeCheckId = 0;
+
+async function maybeShowTodayScheduleNotice() {
+  const checkId = ++scheduleNoticeCheckId;
+  const me = getCurrentUser();
+  if (!me || isAdmin()) return;
+
+  const noticeDate = todayStr();
+  const sessions = getSchedulesOfDate(noticeDate, me.id);
+  if (!sessions.length) return;
+
+  try {
+    if (await dbHasAcknowledgedScheduleNotice(noticeDate)) return;
+  } catch (err) {
+    // Vẫn nhắc lịch nếu chưa kiểm tra được server để tránh giáo viên bỏ sót ca.
+    console.warn("Không kiểm tra được trạng thái nhắc lịch", err);
+  }
+  if (checkId !== scheduleNoticeCheckId || currentPage !== "schedule") return;
+  if (getCurrentUser()?.id !== me.id) return;
+
+  const sessionItems = sessions
+    .map((session) => {
+      const subject = getSubject(session.subject_id)?.name || "Ca dạy";
+      const branch = getBranch(session.branch_id)?.name || "";
+      return `<div class="schedule-notice-item">
+        <div class="schedule-notice-time">${formatTime(session.start_time)} – ${formatTime(session.end_time)}</div>
+        <div class="schedule-notice-info">
+          <b>${escapeHtml(subject)}</b>
+          ${branch ? `<span>${escapeHtml(branch)}</span>` : ""}
+        </div>
+      </div>`;
+    })
+    .join("");
+
+  openModal(
+    "Nhắc lịch dạy hôm nay",
+    `<div class="schedule-notice">
+      <div class="schedule-notice-intro">
+        <i class="ti ti-bell-ringing"></i>
+        <p>Bạn có <b>${sessions.length} ca dạy</b> ngày hôm nay:</p>
+      </div>
+      <div class="schedule-notice-list">${sessionItems}</div>
+      <div class="form-actions schedule-notice-actions">
+        <button type="button" class="btn btn-primary" id="schedule-notice-ack-btn" onclick="acknowledgeTodayScheduleNotice()">
+          <i class="ti ti-check"></i> Đã hiểu
+        </button>
+      </div>
+    </div>`,
+  );
+}
+
+async function acknowledgeTodayScheduleNotice() {
+  const btn = document.getElementById("schedule-notice-ack-btn");
+  if (btn) btn.disabled = true;
+  try {
+    await dbAcknowledgeScheduleNotice(todayStr());
+    closeModal();
+  } catch (err) {
+    console.error(err);
+    showToast("Chưa lưu được xác nhận. Vui lòng thử lại.", "error");
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ============================================================
@@ -468,15 +582,47 @@ function dashboardAdmin() {
     return sum + (r.total || 0);
   }, 0);
 
-  const rows = todaySessions
-    .map((s) => {
-      const st = SCHEDULE_STATUS[displayStatus(s)];
+  const currentTime = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+  const sessionsByTeacher = new Map();
+  todaySessions.forEach((session) => {
+    if (!sessionsByTeacher.has(session.teacher_id)) sessionsByTeacher.set(session.teacher_id, []);
+    sessionsByTeacher.get(session.teacher_id).push(session);
+  });
+  const teachersToday = Array.from(sessionsByTeacher.entries())
+    .map(([teacherId, sessions]) => ({
+      teacher: getProfile(teacherId),
+      sessions,
+    }))
+    .sort((a, b) => (a.teacher?.full_name || "").localeCompare(b.teacher?.full_name || "", "vi"));
+  const checkedInTeachers = teachersToday.filter(({ sessions }) =>
+    sessions.some((s) => s.status === "in_progress" || s.status === "completed"),
+  ).length;
+
+  const attendanceRows = teachersToday
+    .map(({ teacher, sessions }) => {
+      const checkedIn = sessions.filter((s) => s.status === "in_progress" || s.status === "completed").length;
+      const completed = sessions.filter((s) => s.status === "completed").length;
+      const inProgress = sessions.some((s) => s.status === "in_progress");
+      const late = sessions.filter(
+        (s) => s.status === "scheduled" && s.start_time.slice(0, 5) <= currentTime,
+      ).length;
+      let status = { label: "Chờ vào ca", badge: "badge-gray" };
+      if (inProgress) status = { label: "Đang dạy", badge: "badge-warn" };
+      else if (late) status = { label: `Chưa vào ca (${late} ca)`, badge: "badge-red" };
+      else if (completed === sessions.length) status = { label: "Đã hoàn thành", badge: "badge-green" };
+      else if (completed) status = { label: "Chờ ca tiếp theo", badge: "badge-gray" };
+
+      const timeSlots = sessions
+        .map((s) => `${formatTime(s.start_time)}–${formatTime(s.end_time)}`)
+        .join(", ");
+      const branchNames = [...new Set(sessions.map((s) => getBranch(s.branch_id)?.name || "?"))].join(", ");
       return `<tr>
-        <td><b>${formatTime(s.start_time)} - ${formatTime(s.end_time)}</b></td>
-        <td>${escapeHtml(getProfile(s.teacher_id)?.full_name || "?")}</td>
-        <td>${escapeHtml(getSubject(s.subject_id)?.name || "?")}</td>
-        <td>${escapeHtml(getBranch(s.branch_id)?.name || "?")}</td>
-        <td><span class="badge ${st.badge}">${st.label}</span></td>
+        <td><b>${escapeHtml(teacher?.full_name || "?")}</b></td>
+        <td>${escapeHtml(timeSlots)}</td>
+        <td><b>${checkedIn}/${sessions.length}</b></td>
+        <td><span class="badge badge-green">${completed}</span></td>
+        <td>${escapeHtml(branchNames)}</td>
+        <td><span class="badge ${status.badge}">${status.label}</span></td>
       </tr>`;
     })
     .join("");
@@ -492,9 +638,9 @@ function dashboardAdmin() {
         <div><div class="stat-label">Giáo viên</div><div class="stat-value">${teachers.length}</div></div>
       </div>
       <div class="stat-card">
-        <div class="stat-icon"><i class="ti ti-calendar-event"></i></div>
-        <div><div class="stat-label">Ca dạy hôm nay</div><div class="stat-value">${todaySessions.length}</div>
-        <div class="stat-sub">${todaySessions.filter((s) => s.status === "completed").length} đã hoàn thành</div></div>
+        <div class="stat-icon"><i class="ti ti-login-2"></i></div>
+        <div><div class="stat-label">Giáo viên đã vào ca</div><div class="stat-value">${checkedInTeachers}</div>
+        <div class="stat-sub">${checkedInTeachers}/${teachersToday.length} giáo viên có lịch hôm nay</div></div>
       </div>
       <div class="stat-card">
         <div class="stat-icon"><i class="ti ti-coin"></i></div>
@@ -505,17 +651,17 @@ function dashboardAdmin() {
     <div class="card">
       <div class="card-header">
         <div>
-          <div class="card-title">Lịch dạy hôm nay</div>
-          <div class="card-subtitle">${new Date().toLocaleDateString("vi-VN", { weekday: "long", day: "numeric", month: "numeric" })}</div>
+          <div class="card-title">Theo dõi vào ca hôm nay</div>
+          <div class="card-subtitle">Cập nhật theo thao tác Vào ca và Xong ca của giáo viên · ${new Date().toLocaleDateString("vi-VN", { weekday: "long", day: "numeric", month: "numeric" })}</div>
         </div>
         <button class="btn btn-outline btn-sm" onclick="renderPage('schedule')"><i class="ti ti-calendar-time"></i> Xem thời khóa biểu</button>
       </div>
       ${
-        todaySessions.length
+        teachersToday.length
           ? `<div class="table-wrap"><table>
-              <thead><tr><th>Giờ</th><th>Giáo viên</th><th>Môn học</th><th>Chi nhánh</th><th>Trạng thái</th></tr></thead>
-              <tbody>${rows}</tbody></table></div>`
-          : `<div class="empty-state"><i class="ti ti-calendar-off"></i><p>Hôm nay không có ca dạy nào</p></div>`
+              <thead><tr><th>Giáo viên</th><th>Khung giờ</th><th>Đã vào ca</th><th>Hoàn thành</th><th>Chi nhánh</th><th>Trạng thái hiện tại</th></tr></thead>
+              <tbody>${attendanceRows}</tbody></table></div>`
+          : `<div class="empty-state"><i class="ti ti-user-check"></i><p>Hôm nay chưa có giáo viên nào được xếp ca</p></div>`
       }
     </div>
 
@@ -540,6 +686,7 @@ function dashboardTeacher() {
   const year = now.getFullYear();
   const todaySessions = getSchedulesOfDate(today, me.id);
   const calc = calcTeacherSalary(me.id, month, year);
+  const branchLabel = getTeacherBranches(me.id).map((b) => b.name).join(" · ");
 
   const rows = todaySessions.map((s) => teacherSessionCard(s)).join("");
 
@@ -548,7 +695,7 @@ function dashboardTeacher() {
       <div class="card-header">
         <div>
           <div class="card-title">Xin chào, ${escapeHtml(me.full_name || "Giáo viên")} 👋</div>
-          <div class="card-subtitle">${escapeHtml(getBranch(me.branch_id)?.name || "Chưa được gán chi nhánh")}</div>
+          <div class="card-subtitle">${escapeHtml(branchLabel || "Chưa được gán chi nhánh")}</div>
         </div>
       </div>
     </div>
@@ -754,7 +901,7 @@ function openSubjectsModal(branchId) {
         </div>
         <div class="form-group">
           <label class="form-label">Học phí (đ)</label>
-          <input type="number" class="form-control" id="subj-fee" min="0" step="1000" placeholder="500000">
+          <input type="text" class="form-control money-input" id="subj-fee" inputmode="numeric" autocomplete="off" oninput="moneyInput(this)" placeholder="500.000">
         </div>
       </div>
       <div class="form-actions" style="margin-top:0">
@@ -767,9 +914,9 @@ async function addSubject(e, branchId) {
   e.preventDefault();
   const name = document.getElementById("subj-name").value.trim();
   if (!name) return;
-  const fee = document.getElementById("subj-fee").value;
+  const fee = readMoneyInput("subj-fee");
   try {
-    await dbAddSubject(branchId, name, fee ? Number(fee) : null);
+    await dbAddSubject(branchId, name, fee);
     showToast("Đã thêm môn học");
     openSubjectsModal(branchId);
     if (currentPage === "branches") renderPage("branches");
@@ -790,7 +937,7 @@ function openEditSubjectModal(id, branchId) {
         </div>
         <div class="form-group">
           <label class="form-label">Học phí (đ)</label>
-          <input type="number" class="form-control" id="subj-edit-fee" min="0" step="1000" value="${s?.fee ?? ""}" placeholder="500000">
+          <input type="text" class="form-control money-input" id="subj-edit-fee" inputmode="numeric" autocomplete="off" oninput="moneyInput(this)" value="${formatMoneyInputValue(s?.fee)}" placeholder="500.000">
         </div>
       </div>
       <div class="form-actions">
@@ -802,11 +949,11 @@ function openEditSubjectModal(id, branchId) {
 
 async function saveSubjectEdit(e, id, branchId) {
   e.preventDefault();
-  const fee = document.getElementById("subj-edit-fee").value;
+  const fee = readMoneyInput("subj-edit-fee");
   try {
     await dbUpdateSubject(id, {
       name: document.getElementById("subj-edit-name").value.trim(),
-      fee: fee ? Number(fee) : null,
+      fee,
     });
     showToast("Đã cập nhật môn học");
     openSubjectsModal(branchId);
@@ -853,7 +1000,9 @@ function teachers() {
           </div>
         </td>
         <td>${escapeHtml(t.phone || "—")}</td>
-        <td>${escapeHtml(getBranch(t.branch_id)?.name || "—")}</td>
+        <td>${getTeacherBranches(t.id).length
+          ? getTeacherBranches(t.id).map((b) => `<span class="badge badge-gray">${escapeHtml(b.name)}</span>`).join(" ")
+          : "—"}</td>
         <td>${salaryText}</td>
         <td>
           <button class="btn btn-outline btn-sm" onclick="openSalaryModal('${t.id}')" title="Lương"><i class="ti ti-coin"></i> Lương</button>
@@ -873,7 +1022,7 @@ function teachers() {
     <div class="page-header">
       <div>
         <div class="page-title">Giáo viên</div>
-        <div class="page-desc">Cấp tài khoản, gán chi nhánh và khởi tạo lương cho giáo viên</div>
+        <div class="page-desc">Cấp tài khoản, gán nhiều chi nhánh và khởi tạo lương cho giáo viên</div>
       </div>
       <button class="btn btn-primary" onclick="openTeacherModal()"><i class="ti ti-user-plus"></i> Thêm giáo viên</button>
     </div>
@@ -909,8 +1058,12 @@ function openTeacherModal(id) {
     showToast("Hãy tạo chi nhánh trước khi thêm giáo viên", "error");
     return;
   }
+  const selectedBranchIds = new Set(t ? getTeacherBranchIds(t.id) : []);
   const branchOptions = DB.branches
-    .map((b) => `<option value="${b.id}" ${t?.branch_id === b.id ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
+    .map((b, index) => `<label class="choice-chip">
+      <input type="checkbox" name="tc-branch" value="${b.id}" ${selectedBranchIds.has(b.id) || (!t && index === 0) ? "checked" : ""}>
+      <span>${escapeHtml(b.name)}</span>
+    </label>`)
     .join("");
   const accountFields = t
     ? ""
@@ -935,10 +1088,10 @@ function openTeacherModal(id) {
           <label class="form-label">Số điện thoại</label>
           <input type="tel" class="form-control" id="tc-phone" value="${escapeHtml(t?.phone || "")}" ${phoneInputAttrs()}>
         </div>
-        <div class="form-group">
-          <label class="form-label">Chi nhánh *</label>
-          <select class="form-control" id="tc-branch" required>${branchOptions}</select>
-        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Chi nhánh giảng dạy * <span class="form-hint">(có thể chọn nhiều)</span></label>
+        <div class="choice-grid">${branchOptions}</div>
       </div>
       <div class="form-actions">
         <button type="button" class="btn btn-outline" onclick="closeModal()">Hủy</button>
@@ -953,11 +1106,14 @@ async function saveTeacher(e, id) {
   btn.disabled = true;
   try {
     const phone = readPhoneField("tc-phone");
+    const branchIds = [...document.querySelectorAll('input[name="tc-branch"]:checked')].map((x) => x.value);
+    if (!branchIds.length) throw new Error("Chọn ít nhất một chi nhánh");
     if (id) {
+      await dbSetTeacherBranches(id, branchIds);
       await dbUpdateProfile(id, {
         full_name: document.getElementById("tc-name").value.trim(),
         phone,
-        branch_id: document.getElementById("tc-branch").value,
+        branch_id: branchIds[0],
       });
       showToast("Đã cập nhật giáo viên");
     } else {
@@ -966,7 +1122,7 @@ async function saveTeacher(e, id) {
         password: document.getElementById("tc-password").value,
         full_name: document.getElementById("tc-name").value.trim(),
         phone,
-        branch_id: document.getElementById("tc-branch").value,
+        branch_ids: branchIds,
       });
       showToast("Đã tạo tài khoản giáo viên — gửi email + mật khẩu cho giáo viên nhé");
     }
@@ -1063,11 +1219,11 @@ function openSalaryModal(teacherId) {
       <div class="form-row">
         <div class="form-group" id="sl-base-group">
           <label class="form-label">Lương cố định (đ/tháng) *</label>
-          <input type="number" class="form-control" id="sl-base" min="0" step="1000" placeholder="5000000">
+          <input type="text" class="form-control money-input" id="sl-base" inputmode="numeric" autocomplete="off" oninput="moneyInput(this)" placeholder="5.000.000">
         </div>
         <div class="form-group" id="sl-per-group" style="display:none">
           <label class="form-label">Đơn giá mỗi tiết (đ) *</label>
-          <input type="number" class="form-control" id="sl-per" min="0" step="1000" placeholder="200000">
+          <input type="text" class="form-control money-input" id="sl-per" inputmode="numeric" autocomplete="off" oninput="moneyInput(this)" placeholder="200.000">
         </div>
       </div>
       <div class="form-group">
@@ -1092,13 +1248,13 @@ function toggleSalaryFields() {
 async function saveSalary(e, teacherId) {
   e.preventDefault();
   const type = document.getElementById("sl-type").value;
-  const base = document.getElementById("sl-base").value;
-  const per = document.getElementById("sl-per").value;
-  if ((type === "fixed" || type === "mixed") && !base) {
+  const base = readMoneyInput("sl-base");
+  const per = readMoneyInput("sl-per");
+  if ((type === "fixed" || type === "mixed") && base == null) {
     showToast("Nhập lương cố định", "error");
     return;
   }
-  if ((type === "per_session" || type === "mixed") && !per) {
+  if ((type === "per_session" || type === "mixed") && per == null) {
     showToast("Nhập đơn giá mỗi tiết", "error");
     return;
   }
@@ -1110,8 +1266,8 @@ async function saveSalary(e, teacherId) {
     await dbAddSalary({
       teacher_id: teacherId,
       salary_type: type,
-      base_salary: type === "per_session" ? null : Number(base),
-      per_session_amount: type === "fixed" ? null : Number(per),
+      base_salary: type === "per_session" ? null : base,
+      per_session_amount: type === "fixed" ? null : per,
       effective_from: document.getElementById("sl-from").value,
       note: document.getElementById("sl-note").value.trim() || null,
     });
@@ -1262,6 +1418,21 @@ function openScheduleModal(id, dateStr) {
   const branchOptions = DB.branches
     .map((b) => `<option value="${b.id}" ${selectedBranch === b.id ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
     .join("");
+  const referenceDate = s?.sched_date || dateStr || toDateStr(schedWeekStartDate);
+  const referenceDay = new Date(referenceDate + "T00:00:00").getDay();
+  const defaultWeekday = referenceDay === 0 ? 6 : referenceDay - 1;
+  const weekdayPicker = s
+    ? ""
+    : `<div class="form-group">
+        <label class="form-label">Các ngày cần tạo trong tuần *</label>
+        <div class="choice-grid weekday-picker">
+          ${WEEKDAYS.map((label, index) => `<label class="choice-chip">
+            <input type="checkbox" name="sc-weekday" value="${index}" ${index === defaultWeekday ? "checked" : ""}>
+            <span>${label}</span>
+          </label>`).join("")}
+        </div>
+        <div class="form-hint">Ví dụ: chọn Thứ 3 và Thứ 5 để tạo hai ca cùng lúc trong tuần.</div>
+      </div>`;
   openModal(s ? "Sửa ca dạy" : "Thêm ca dạy", `
     <form onsubmit="saveSchedule(event, '${id || ""}')">
       <div class="form-group">
@@ -1279,9 +1450,10 @@ function openScheduleModal(id, dateStr) {
         </div>
       </div>
       <div class="form-group">
-        <label class="form-label">Ngày dạy *</label>
-        ${dmyDateField("sc-date", s?.sched_date || dateStr || todayStr())}
+        <label class="form-label">${s ? "Ngày dạy" : "Tuần áp dụng (chọn một ngày trong tuần)"} *</label>
+        ${dmyDateField("sc-date", referenceDate)}
       </div>
+      ${weekdayPicker}
       <div class="form-row">
         <div class="form-group">
           <label class="form-label">Giờ bắt đầu *</label>
@@ -1334,26 +1506,39 @@ async function saveSchedule(e, id) {
     showToast("Chi nhánh này chưa có môn học hoặc giáo viên", "error");
     return;
   }
-  if (!document.getElementById("sc-date").value) {
+  const dateValue = document.getElementById("sc-date").value;
+  if (!dateValue) {
     showToast("Chọn ngày dạy", "error");
     return;
   }
-  const fields = {
+  const commonFields = {
     branch_id: document.getElementById("sc-branch").value,
     subject_id: subjectId,
     teacher_id: teacherId,
-    sched_date: document.getElementById("sc-date").value,
     start_time: start,
     end_time: end,
     note: document.getElementById("sc-note").value.trim() || null,
   };
   try {
     if (id) {
-      await dbUpdateSchedule(id, fields);
+      await dbUpdateSchedule(id, { ...commonFields, sched_date: dateValue });
       showToast("Đã cập nhật ca dạy");
     } else {
-      await dbAddSchedule(fields);
-      showToast("Đã thêm ca dạy");
+      const weekdayIndexes = [...document.querySelectorAll('input[name="sc-weekday"]:checked')]
+        .map((x) => Number(x.value));
+      if (!weekdayIndexes.length) {
+        showToast("Chọn ít nhất một ngày trong tuần", "error");
+        return;
+      }
+      const firstDay = weekStart(new Date(dateValue + "T00:00:00"));
+      const items = weekdayIndexes.map((dayIndex) => {
+        const d = new Date(firstDay);
+        d.setDate(d.getDate() + dayIndex);
+        return { ...commonFields, sched_date: toDateStr(d) };
+      });
+      const added = await dbAddSchedules(items);
+      const skipped = items.length - added.length;
+      showToast(`Đã thêm ${added.length} ca dạy${skipped ? `, bỏ qua ${skipped} ca trùng` : ""}`);
     }
     closeModal();
     renderPage("schedule");
@@ -1427,94 +1612,335 @@ let reportMonth = new Date().getMonth() + 1;
 let reportYear = new Date().getFullYear();
 let reportBranchFilter = "";
 
-function report() {
-  const me = getCurrentUser();
-  const teachers = isAdmin() ? getTeachers(reportBranchFilter || null) : [getProfile(me.id)];
+const REPORT_VIEW_LABELS = {
+  branch: "Theo chi nhánh",
+  teacher: "Theo giáo viên",
+  salary: "Báo cáo lương",
+};
 
-  let grandTotal = 0;
-  let hasMissingRate = false;
-  const rows = teachers
-    .filter(Boolean)
-    .map((t) => {
-      const r = calcTeacherSalary(t.id, reportMonth, reportYear);
-      if (r.total != null) grandTotal += r.total;
-      else hasMissingRate = true;
-      return `<tr>
-        <td>
-          <div style="display:flex; align-items:center; gap:10px">
-            <span class="avatar">${escapeHtml(initials(t.full_name))}</span>
-            <b>${escapeHtml(t.full_name || "?")}</b>
-          </div>
-        </td>
-        <td>${escapeHtml(getBranch(t.branch_id)?.name || "—")}</td>
-        <td>${r.rate ? `<span class="badge badge-blue">${SALARY_TYPE_LABELS[r.rate.salary_type]}</span>` : '<span class="badge badge-gray">Chưa chốt lương</span>'}</td>
-        <td>${r.rate ? salarySummary(r.rate) : "—"}</td>
-        <td>${r.assigned}</td>
-        <td><span class="badge badge-green">${r.completed}</span></td>
-        <td>${r.missed ? `<span class="badge badge-red">${r.missed}</span>` : "0"}</td>
-        <td><b>${r.total == null ? "—" : formatMoney(r.total)}</b></td>
-      </tr>`;
-    })
-    .join("");
+function reportViewTabs(activeView) {
+  return [
+    ...(isAdmin() ? [{ page: "report-branch", view: "branch", icon: "building-community" }] : []),
+    { page: "report-teacher", view: "teacher", icon: "user-check" },
+    { page: "report-salary", view: "salary", icon: "coin" },
+  ].map((item) => `<button class="btn btn-sm ${activeView === item.view ? "btn-primary" : "btn-outline"}" onclick="renderPage('${item.page}')">
+    <i class="ti ti-${item.icon}"></i> ${REPORT_VIEW_LABELS[item.view]}
+  </button>`).join("");
+}
 
+function reportPeriodOptions(selectedMonth, selectedYear) {
   const monthOptions = MONTHS.map(
-    (m) => `<option value="${m}" ${m === reportMonth ? "selected" : ""}>Tháng ${m}</option>`,
+    (m) => `<option value="${m}" ${m === selectedMonth ? "selected" : ""}>Tháng ${m}</option>`,
   ).join("");
   const thisYear = new Date().getFullYear();
-  const years = [thisYear - 2, thisYear - 1, thisYear, thisYear + 1];
+  const years = [...new Set([thisYear - 2, thisYear - 1, thisYear, thisYear + 1, selectedYear])].sort();
   const yearOptions = years
-    .map((y) => `<option value="${y}" ${y === reportYear ? "selected" : ""}>${y}</option>`)
+    .map((y) => `<option value="${y}" ${y === selectedYear ? "selected" : ""}>${y}</option>`)
     .join("");
+  return { monthOptions, yearOptions };
+}
+
+function normalizeAdjustmentSearch(value) {
+  return String(value || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+}
+
+function formatAdjustmentDelta(value) {
+  const amount = Number(value || 0);
+  return amount > 0 ? `+${formatMoney(amount)}` : formatMoney(amount);
+}
+
+function salaryAdjustmentsPage() {
+  const teachers = getTeachers(reportBranchFilter || null);
+  const { monthOptions, yearOptions } = reportPeriodOptions(reportMonth, reportYear);
   const branchOptions = DB.branches
     .map((b) => `<option value="${b.id}" ${reportBranchFilter === b.id ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
     .join("");
+  let totalAllowance = 0;
+  let totalDeduction = 0;
+  const rows = teachers.map((teacher) => {
+    const adjustment = getMonthlySalaryAdjustment(teacher.id, reportMonth, reportYear);
+    const allowance = Number(adjustment?.allowance || 0);
+    const deduction = Number(adjustment?.deduction || 0);
+    const net = allowance - deduction;
+    totalAllowance += allowance;
+    totalDeduction += deduction;
+    const branches = getTeacherBranches(teacher.id).map((b) => b.name).join(", ") || "—";
+    const searchValue = normalizeAdjustmentSearch(`${teacher.full_name || ""} ${teacher.email || ""} ${branches}`);
+    return `<tr data-adjustment-row data-teacher-id="${teacher.id}" data-search="${escapeHtml(searchValue)}">
+      <td data-label="Giáo viên">
+        <div class="adjustment-teacher">
+          <span class="avatar">${escapeHtml(initials(teacher.full_name))}</span>
+          <div><b>${escapeHtml(teacher.full_name || "?")}</b><span>${escapeHtml(teacher.email || "")}</span></div>
+        </div>
+      </td>
+      <td data-label="Chi nhánh"><span class="adjustment-branches">${escapeHtml(branches)}</span></td>
+      <td data-label="Phụ cấp">
+        <div class="adjustment-money-field is-allowance"><span>+</span><input class="money-input" data-field="allowance" type="text" inputmode="numeric" autocomplete="off" value="${formatMoneyInputValue(allowance)}" oninput="moneyInput(this); updateSalaryAdjustmentPreview()" aria-label="Phụ cấp của ${escapeHtml(teacher.full_name || "giáo viên")}"><small>đ</small></div>
+      </td>
+      <td data-label="Khấu trừ">
+        <div class="adjustment-money-field is-deduction"><span>−</span><input class="money-input" data-field="deduction" type="text" inputmode="numeric" autocomplete="off" value="${formatMoneyInputValue(deduction)}" oninput="moneyInput(this); updateSalaryAdjustmentPreview()" aria-label="Khấu trừ của ${escapeHtml(teacher.full_name || "giáo viên")}"><small>đ</small></div>
+      </td>
+      <td data-label="Chênh lệch"><b class="adjustment-net ${net > 0 ? "color-green" : net < 0 ? "color-red" : ""}" data-field="net">${formatAdjustmentDelta(net)}</b></td>
+    </tr>`;
+  }).join("");
+  const totalNet = totalAllowance - totalDeduction;
+
+  return `
+    <div class="page-header adjustment-page-header">
+      <div>
+        <div class="page-title">Phụ cấp & khấu trừ</div>
+        <div class="page-desc">Khai báo các khoản phát sinh theo từng giáo viên trước khi xem báo cáo lương.</div>
+      </div>
+      <button class="btn btn-outline" onclick="openSalaryAdjustmentCopyModal()"><i class="ti ti-copy"></i> Sao chép từ tháng khác</button>
+    </div>
+
+    <div class="adjustment-period-card">
+      <div class="adjustment-period-title"><span><i class="ti ti-calendar-dollar"></i></span><div><b>Kỳ lương đang khai báo</b><small>Chọn tháng, năm và phạm vi giáo viên</small></div></div>
+      <div class="adjustment-period-controls">
+        <label><span>Tháng</span><select class="form-control" onchange="reportMonth=Number(this.value); renderPage(currentPage)">${monthOptions}</select></label>
+        <label><span>Năm</span><select class="form-control" onchange="reportYear=Number(this.value); renderPage(currentPage)">${yearOptions}</select></label>
+        <label class="adjustment-branch-filter"><span>Chi nhánh</span><select class="form-control" onchange="reportBranchFilter=this.value; renderPage(currentPage)"><option value="">Tất cả chi nhánh</option>${branchOptions}</select></label>
+      </div>
+    </div>
+
+    <form class="adjustment-form" onsubmit="saveSalaryAdjustments(event)">
+      <div class="card adjustment-editor-card">
+        <div class="adjustment-editor-head">
+          <div><div class="card-title">Danh sách giáo viên · Tháng ${reportMonth}/${reportYear}</div><div class="card-subtitle" id="adjustment-visible-count">${teachers.length} giáo viên</div></div>
+          ${teachers.length ? `<div class="search-wrap adjustment-search"><i class="ti ti-search"></i><input class="search-input" type="search" placeholder="Tìm tên, email hoặc chi nhánh..." oninput="filterSalaryAdjustmentRows(this.value)" onkeydown="if(event.key==='Enter') event.preventDefault()"></div>` : ""}
+        </div>
+
+        <div class="adjustment-summary-strip">
+          <div><span>Tổng phụ cấp</span><b class="color-green" id="adjustment-total-allowance">${formatAdjustmentDelta(totalAllowance)}</b></div>
+          <div><span>Tổng khấu trừ</span><b class="color-red" id="adjustment-total-deduction">${totalDeduction ? `-${formatMoney(totalDeduction)}` : formatMoney(0)}</b></div>
+          <div><span>Chênh lệch kỳ lương</span><b id="adjustment-total-net" class="${totalNet > 0 ? "color-green" : totalNet < 0 ? "color-red" : ""}">${formatAdjustmentDelta(totalNet)}</b></div>
+        </div>
+
+        ${rows ? `<div class="table-wrap adjustment-table-wrap"><table class="adjustment-table">
+          <thead><tr><th>Giáo viên</th><th>Chi nhánh</th><th>Phụ cấp</th><th>Khấu trừ</th><th>Chênh lệch</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table><div class="adjustment-search-empty" id="adjustment-search-empty" hidden><i class="ti ti-search-off"></i><span>Không tìm thấy giáo viên phù hợp</span></div></div>` : `<div class="empty-state"><i class="ti ti-users"></i><p>Chưa có giáo viên trong chi nhánh đã chọn</p></div>`}
+
+        ${rows ? `<div class="adjustment-save-bar"><div><i class="ti ti-info-circle"></i><span>Số tiền đã lưu sẽ tự động được dùng trong báo cáo lương tháng ${reportMonth}.</span></div><button type="submit" class="btn btn-primary"><i class="ti ti-device-floppy"></i> Lưu thay đổi</button></div>` : ""}
+      </div>
+    </form>`;
+}
+
+function updateSalaryAdjustmentPreview() {
+  let totalAllowance = 0;
+  let totalDeduction = 0;
+  document.querySelectorAll("[data-adjustment-row]").forEach((row) => {
+    const allowance = readMoneyInput(row.querySelector('[data-field="allowance"]')) || 0;
+    const deduction = readMoneyInput(row.querySelector('[data-field="deduction"]')) || 0;
+    const net = allowance - deduction;
+    totalAllowance += allowance;
+    totalDeduction += deduction;
+    const netEl = row.querySelector('[data-field="net"]');
+    netEl.textContent = formatAdjustmentDelta(net);
+    netEl.className = `adjustment-net ${net > 0 ? "color-green" : net < 0 ? "color-red" : ""}`;
+  });
+  const totalNet = totalAllowance - totalDeduction;
+  document.getElementById("adjustment-total-allowance").textContent = formatAdjustmentDelta(totalAllowance);
+  document.getElementById("adjustment-total-deduction").textContent = totalDeduction ? `-${formatMoney(totalDeduction)}` : formatMoney(0);
+  const netEl = document.getElementById("adjustment-total-net");
+  netEl.textContent = formatAdjustmentDelta(totalNet);
+  netEl.className = totalNet > 0 ? "color-green" : totalNet < 0 ? "color-red" : "";
+}
+
+function filterSalaryAdjustmentRows(value) {
+  const query = normalizeAdjustmentSearch(value);
+  const rows = [...document.querySelectorAll("[data-adjustment-row]")];
+  let visible = 0;
+  rows.forEach((row) => {
+    const show = !query || row.dataset.search.includes(query);
+    row.classList.toggle("is-hidden", !show);
+    if (show) visible++;
+  });
+  const countEl = document.getElementById("adjustment-visible-count");
+  if (countEl) countEl.textContent = query ? `${visible}/${rows.length} giáo viên` : `${rows.length} giáo viên`;
+  const emptyEl = document.getElementById("adjustment-search-empty");
+  if (emptyEl) emptyEl.hidden = visible !== 0;
+}
+
+async function saveSalaryAdjustments(e) {
+  e.preventDefault();
+  const submitButton = e.submitter;
+  if (submitButton) submitButton.disabled = true;
+  const items = [...e.currentTarget.querySelectorAll("[data-adjustment-row]")].map((row) => ({
+    teacher_id: row.dataset.teacherId,
+    allowance: readMoneyInput(row.querySelector('[data-field="allowance"]')) || 0,
+    deduction: readMoneyInput(row.querySelector('[data-field="deduction"]')) || 0,
+  }));
+  if (items.some((item) => item.allowance < 0 || item.deduction < 0)) {
+    showToast("Phụ cấp và khấu trừ không được là số âm", "error");
+    if (submitButton) submitButton.disabled = false;
+    return;
+  }
+  try {
+    await dbSaveMonthlySalaryAdjustments(reportMonth, reportYear, items);
+    showToast(`Đã lưu khai báo tháng ${reportMonth}/${reportYear}`);
+    renderPage("salary-adjustments");
+  } catch (err) {
+    console.error(err);
+    showToast("Lỗi: " + (err.message || "Không lưu được khai báo"), "error");
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+function openSalaryAdjustmentCopyModal() {
+  const nextMonth = reportMonth === 12 ? 1 : reportMonth + 1;
+  const nextYear = reportMonth === 12 ? reportYear + 1 : reportYear;
+  const sourceOptions = reportPeriodOptions(reportMonth, reportYear);
+  const targetOptions = reportPeriodOptions(nextMonth, nextYear);
+  openModal("Sao chép phụ cấp & khấu trừ", `
+    <form onsubmit="copySalaryAdjustments(event)">
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Từ tháng</label><select id="adjustment-copy-from-month" class="form-control">${sourceOptions.monthOptions}</select></div>
+        <div class="form-group"><label class="form-label">Năm</label><select id="adjustment-copy-from-year" class="form-control">${sourceOptions.yearOptions}</select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="form-label">Sang tháng</label><select id="adjustment-copy-to-month" class="form-control">${targetOptions.monthOptions}</select></div>
+        <div class="form-group"><label class="form-label">Năm</label><select id="adjustment-copy-to-year" class="form-control">${targetOptions.yearOptions}</select></div>
+      </div>
+      <div class="report-history-note"><i class="ti ti-info-circle"></i><span>Dữ liệu của các giáo viên có trong tháng nguồn sẽ ghi đè lên dữ liệu tương ứng ở tháng đích.</span></div>
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">Hủy</button>
+        <button type="submit" class="btn btn-primary"><i class="ti ti-copy"></i> Sao chép</button>
+      </div>
+    </form>`);
+}
+
+async function copySalaryAdjustments(e) {
+  e.preventDefault();
+  const submitButton = e.submitter;
+  if (submitButton) submitButton.disabled = true;
+  const fromMonth = Number(document.getElementById("adjustment-copy-from-month").value);
+  const fromYear = Number(document.getElementById("adjustment-copy-from-year").value);
+  const toMonth = Number(document.getElementById("adjustment-copy-to-month").value);
+  const toYear = Number(document.getElementById("adjustment-copy-to-year").value);
+  try {
+    const copied = await dbCopyMonthlySalaryAdjustments(fromMonth, fromYear, toMonth, toYear);
+    reportMonth = toMonth;
+    reportYear = toYear;
+    closeModal();
+    renderPage("salary-adjustments");
+    showToast(`Đã sao chép ${copied.length} giáo viên sang tháng ${toMonth}/${toYear}`);
+  } catch (err) {
+    console.error(err);
+    showToast("Lỗi: " + (err.message || "Không sao chép được dữ liệu"), "error");
+    if (submitButton) submitButton.disabled = false;
+  }
+}
+
+function report(view) {
+  const me = getCurrentUser();
+  const teachers = (isAdmin() ? getTeachers(reportBranchFilter || null) : [getProfile(me.id)]).filter(Boolean);
+  let monthSessions = getSchedulesInMonth(reportMonth, reportYear, isAdmin() ? null : me.id);
+  if (isAdmin() && reportBranchFilter) {
+    monthSessions = monthSessions.filter((s) => s.branch_id === reportBranchFilter);
+  }
+  const completedSessions = monthSessions
+    .filter((s) => s.status === "completed")
+    .sort((a, b) => a.sched_date.localeCompare(b.sched_date) || a.start_time.localeCompare(b.start_time));
+
+  const branchTotals = new Map();
+  const teacherTotals = new Map();
+  completedSessions.forEach((s) => {
+    branchTotals.set(s.branch_id, (branchTotals.get(s.branch_id) || 0) + 1);
+    teacherTotals.set(s.teacher_id, (teacherTotals.get(s.teacher_id) || 0) + 1);
+  });
+
+  const branchReportRows = completedSessions.map((s) => `<tr>
+    <td><b>${escapeHtml(getBranch(s.branch_id)?.name || "?")}</b></td>
+    <td>${formatDate(s.sched_date)}</td>
+    <td><b>${formatTime(s.start_time)} – ${formatTime(s.end_time)}</b></td>
+    <td>${escapeHtml(getProfile(s.teacher_id)?.full_name || "?")}</td>
+    <td>${escapeHtml(getSubject(s.subject_id)?.name || "?")}</td>
+    <td><span class="badge badge-green">${branchTotals.get(s.branch_id)}</span></td>
+  </tr>`).join("");
+
+  const teacherReportRows = completedSessions.map((s) => `<tr>
+    <td><b>${escapeHtml(getProfile(s.teacher_id)?.full_name || "?")}</b></td>
+    <td>${formatDate(s.sched_date)}</td>
+    <td><b>${formatTime(s.start_time)} – ${formatTime(s.end_time)}</b></td>
+    <td>${escapeHtml(getBranch(s.branch_id)?.name || "?")}</td>
+    <td>${escapeHtml(getSubject(s.subject_id)?.name || "?")}</td>
+    <td><span class="badge badge-green">${teacherTotals.get(s.teacher_id)}</span></td>
+  </tr>`).join("");
+
+  let grandTotal = 0;
+  let hasMissingRate = false;
+  const salaryRows = teachers.map((t) => {
+    const r = calcTeacherSalary(t.id, reportMonth, reportYear);
+    if (r.total != null) grandTotal += r.total;
+    else hasMissingRate = true;
+    const branches = getTeacherBranches(t.id).map((b) => b.name).join(", ") || "—";
+    return `<tr>
+      <td><b>${escapeHtml(t.full_name || "?")}</b><div class="stat-sub">${escapeHtml(branches)}</div></td>
+      <td>${r.rate ? `<span class="badge badge-blue">${SALARY_TYPE_LABELS[r.rate.salary_type]}</span>` : '<span class="badge badge-gray">Chưa chốt lương</span>'}</td>
+      <td>${r.assigned}</td>
+      <td><span class="badge badge-green">${r.completed}</span></td>
+      <td>${r.rate ? formatMoney(r.baseEarned) : "—"}</td>
+      <td>${r.rate ? formatMoney(r.sessionEarned) : "—"}</td>
+      <td class="color-green">${r.rate ? (r.allowance ? `+${formatMoney(r.allowance)}` : formatMoney(0)) : "—"}</td>
+      <td class="color-red">${r.rate ? (r.deduction ? `-${formatMoney(r.deduction)}` : formatMoney(0)) : "—"}</td>
+      <td><b>${r.total == null ? "—" : formatMoney(r.total)}</b></td>
+    </tr>`;
+  }).join("");
+
+  const { monthOptions, yearOptions } = reportPeriodOptions(reportMonth, reportYear);
+  const branchOptions = DB.branches
+    .map((b) => `<option value="${b.id}" ${reportBranchFilter === b.id ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
+    .join("");
+  const reportTabs = reportViewTabs(view);
 
   return `
     <div class="page-header">
       <div>
-        <div class="page-title">Báo cáo tháng ${reportMonth}/${reportYear}</div>
-        <div class="page-desc">Số ca dạy và lương ${isAdmin() ? "của từng giáo viên" : "của bạn"} — ca <b>Đã dạy</b> là ca giáo viên đã bấm "Xong ca"</div>
+        <div class="page-title">${REPORT_VIEW_LABELS[view]} · Tháng ${reportMonth}/${reportYear}</div>
+        <div class="page-desc">Chi tiết ngày dạy, giờ dạy, số tiết thực tế và lương thực nhận. Một tiết được ghi nhận khi giáo viên bấm “Xong ca”.</div>
       </div>
     </div>
+    <div class="report-view-tabs">${reportTabs}</div>
     <div class="filter-bar">
-      <select class="form-control" style="max-width:130px" onchange="reportMonth=Number(this.value); renderPage('report')">${monthOptions}</select>
-      <select class="form-control" style="max-width:110px" onchange="reportYear=Number(this.value); renderPage('report')">${yearOptions}</select>
+      <select class="form-control" style="max-width:130px" onchange="reportMonth=Number(this.value); renderPage(currentPage)">${monthOptions}</select>
+      <select class="form-control" style="max-width:110px" onchange="reportYear=Number(this.value); renderPage(currentPage)">${yearOptions}</select>
       ${
         isAdmin()
-          ? `<select class="form-control" style="max-width:240px" onchange="reportBranchFilter=this.value; renderPage('report')">
+          ? `<select class="form-control" style="max-width:240px" onchange="reportBranchFilter=this.value; renderPage(currentPage)">
               <option value="">Tất cả chi nhánh</option>${branchOptions}
             </select>`
           : ""
       }
     </div>
-    <div class="card">
-      ${
-        rows
-          ? `<div class="table-wrap"><table>
-              <thead><tr>
-                <th>Giáo viên</th><th>Chi nhánh</th><th>Loại lương</th><th>Mức lương</th>
-                <th>Ca xếp</th><th>Đã dạy</th><th>Không dạy</th><th>Lương tháng</th>
-              </tr></thead>
-              <tbody>${rows}</tbody>
-              ${
-                isAdmin()
-                  ? `<tfoot><tr>
-                      <td colspan="7" style="text-align:right"><b>Tổng chi lương &nbsp;&nbsp;&nbsp; ${hasMissingRate ? " (chưa gồm GV chưa chốt lương)" : ""}</b></td>
-                      <td><b>${formatMoney(grandTotal)}</b></td>
-                    </tr></tfoot>`
-                  : ""
-              }
-            </table></div>`
-          : `<div class="empty-state"><i class="ti ti-chart-bar"></i><p>Chưa có giáo viên nào</p></div>`
-      }
-    </div>
-    <div class="card" style="padding:14px 18px">
-      <div class="card-subtitle">
-        Cách tính: lương <b>cố định</b> nhận nguyên mức theo tháng; lương <b>theo tiết</b> = đơn giá × số ca <b>Đã dạy</b>;
-        lương <b>hỗn hợp</b> = cố định + theo tiết. Mức lương lấy theo lần chốt gần nhất tính đến cuối tháng.
-        Ca không được cập nhật "Xong ca" trước khi qua ngày được tính là <b>không dạy</b>.
-      </div>
-    </div>`;
+    ${view === "branch" && isAdmin() ? `<div class="card">
+      <div class="card-header"><div><div class="card-title">Báo cáo theo chi nhánh</div><div class="card-subtitle">Ngày dạy, giờ ca, giáo viên và tổng số tiết thực tế trong tháng</div></div></div>
+      ${branchReportRows ? `<div class="table-wrap"><table>
+        <thead><tr><th>Chi nhánh</th><th>Ngày dạy</th><th>Giờ ca dạy</th><th>Giáo viên</th><th>Môn học</th><th>Tổng tiết tháng</th></tr></thead>
+        <tbody>${branchReportRows}</tbody>
+      </table></div>` : `<div class="empty-state"><i class="ti ti-building-community"></i><p>Chưa có tiết đã hoàn thành trong tháng</p></div>`}
+    </div>` : ""}
+
+    ${view === "teacher" ? `<div class="card">
+      <div class="card-header"><div><div class="card-title">Báo cáo theo giáo viên</div><div class="card-subtitle">Chi tiết từng ngày và giờ dạy đã hoàn thành</div></div></div>
+      ${teacherReportRows ? `<div class="table-wrap"><table>
+        <thead><tr><th>Giáo viên</th><th>Ngày dạy</th><th>Giờ ca dạy</th><th>Chi nhánh</th><th>Môn học</th><th>Tổng tiết tháng</th></tr></thead>
+        <tbody>${teacherReportRows}</tbody>
+      </table></div>` : `<div class="empty-state"><i class="ti ti-user-check"></i><p>Chưa có tiết đã hoàn thành trong tháng</p></div>`}
+    </div>` : ""}
+
+    ${view === "salary" ? `<div class="card">
+      <div class="card-header"><div><div class="card-title">Báo cáo lương thực nhận</div><div class="card-subtitle">Lương theo ca thực tế, sau phụ cấp và khấu trừ</div></div></div>
+      ${salaryRows ? `<div class="table-wrap"><table>
+        <thead><tr><th>Giáo viên</th><th>Loại lương</th><th>Ca xếp</th><th>Ca thực tế</th><th>Lương tháng theo ca</th><th>Lương tiết</th><th>Phụ cấp</th><th>Khấu trừ</th><th>Thực nhận</th></tr></thead>
+        <tbody>${salaryRows}</tbody>
+        ${isAdmin() ? `<tfoot><tr><td colspan="8" style="text-align:right"><b>Tổng chi lương${hasMissingRate ? " (chưa gồm GV chưa chốt lương)" : ""}</b></td><td><b>${formatMoney(grandTotal)}</b></td></tr></tfoot>` : ""}
+      </table></div>` : `<div class="empty-state"><i class="ti ti-coin"></i><p>Chưa có giáo viên nào</p></div>`}
+    </div>` : ""}
+
+    ${view === "salary" ? `<div class="card" style="padding:14px 18px">
+      <div class="card-subtitle">Cách tính: lương <b>theo tiết</b> = đơn giá × ca thực tế. Lương <b>theo tháng</b> = mức tháng ÷ ca được xếp × ca thực tế. Lương hỗn hợp cộng cả hai phần. <b>Thực nhận</b> = lương theo ca + lương tiết + phụ cấp − khấu trừ.</div>
+    </div>` : ""}`;
 }
 
 // ============================================================
@@ -1524,6 +1950,7 @@ function report() {
 function account() {
   const me = getCurrentUser();
   const roleLabel = isAdmin() ? "Quản trị viên" : "Giáo viên";
+  const myBranchLabel = !isAdmin() ? getTeacherBranches(me.id).map((b) => b.name).join(" · ") : "";
   return `
     <div class="card">
       <div class="card-header">
@@ -1532,7 +1959,7 @@ function account() {
           <div>
             <div class="card-title">${escapeHtml(me.full_name || "(chưa đặt tên)")}</div>
             <div class="card-subtitle">${escapeHtml(me.email || "")} · <span class="badge ${isAdmin() ? "badge-blue" : "badge-green"}">${roleLabel}</span>
-            ${!isAdmin() && me.branch_id ? " · " + escapeHtml(getBranch(me.branch_id)?.name || "") : ""}</div>
+            ${myBranchLabel ? " · " + escapeHtml(myBranchLabel) : ""}</div>
           </div>
         </div>
         <button class="btn btn-danger btn-sm" onclick="handleLogout()"><i class="ti ti-logout-2"></i> Đăng xuất</button>

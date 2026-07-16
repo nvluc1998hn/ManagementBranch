@@ -27,8 +27,10 @@ function sbConfigured() {
 const DB = {
   profiles: [],         // admin + giáo viên (bản thân + GV thuộc chi nhánh mình)
   branches: [],
+  teacher_branches: [], // liên kết nhiều chi nhánh của giáo viên
   subjects: [],
   teacher_salaries: [], // lịch sử lương (mỗi lần chốt là 1 dòng)
+  monthly_salary_adjustments: [], // phụ cấp/khấu trừ theo giáo viên + tháng
   schedules: [],        // lịch dạy theo ngày cụ thể + trạng thái ca
 };
 
@@ -37,8 +39,10 @@ let currentUser = null; // dòng profiles của người đang đăng nhập
 function _emptyDB() {
   DB.profiles = [];
   DB.branches = [];
+  DB.teacher_branches = [];
   DB.subjects = [];
   DB.teacher_salaries = [];
+  DB.monthly_salary_adjustments = [];
   DB.schedules = [];
 }
 
@@ -135,6 +139,16 @@ async function initDB() {
     if (error) throw error;
     DB[tables[i]] = data || [];
   });
+  const branchLinks = await sb().from("teacher_branches").select("*");
+  if (branchLinks.error && !["42P01", "PGRST205"].includes(branchLinks.error.code)) {
+    throw branchLinks.error;
+  }
+  DB.teacher_branches = branchLinks.data || [];
+  const salaryAdjustments = await sb().from("monthly_salary_adjustments").select("*");
+  if (salaryAdjustments.error && !["42P01", "PGRST205"].includes(salaryAdjustments.error.code)) {
+    throw salaryAdjustments.error;
+  }
+  DB.monthly_salary_adjustments = salaryAdjustments.data || [];
   DB.teacher_salaries.sort((a, b) => (a.effective_from < b.effective_from ? 1 : -1));
 }
 
@@ -174,7 +188,10 @@ async function dbDeleteBranch(id) {
   DB.branches = DB.branches.filter((b) => b.id !== id);
   DB.subjects = DB.subjects.filter((s) => s.branch_id !== id);
   DB.schedules = DB.schedules.filter((s) => s.branch_id !== id);
-  DB.profiles = DB.profiles.filter((p) => p.branch_id !== id || p.id === currentUser.id);
+  DB.teacher_branches = DB.teacher_branches.filter((x) => x.branch_id !== id);
+  DB.profiles.forEach((p) => {
+    if (p.branch_id === id) p.branch_id = null;
+  });
 }
 
 // ============================================================
@@ -234,17 +251,29 @@ async function _invokeTeacherFn(body) {
       const ctx = await error.context?.json?.();
       if (ctx?.error) msg = ctx.error;
     } catch (_) { /* giữ msg mặc định */ }
+    if (/teacher_branches_pkey|duplicate key value/i.test(msg)) {
+      msg = "Hàm tạo giáo viên trên Supabase chưa được cập nhật để hỗ trợ nhiều chi nhánh";
+    }
     throw new Error(msg);
   }
   if (data?.error) throw new Error(data.error);
   return data;
 }
 
-async function dbCreateTeacher({ email, password, full_name, phone, branch_id }) {
+async function dbCreateTeacher({ email, password, full_name, phone, branch_ids }) {
   const data = await _invokeTeacherFn({
-    action: "create", email, password, full_name, phone, branch_id,
+    action: "create", email, password, full_name, phone,
+    branch_ids, branch_id: branch_ids[0], // branch_id giữ tương thích Edge Function cũ
   });
   if (data.profile) DB.profiles.push(data.profile);
+  if (data.profile) {
+    const uniqueBranchIds = [...new Set(branch_ids)].filter(Boolean);
+    DB.teacher_branches = DB.teacher_branches.filter((x) => x.teacher_id !== data.profile.id);
+    DB.teacher_branches.push(...uniqueBranchIds.map((branch_id) => ({
+      teacher_id: data.profile.id,
+      branch_id,
+    })));
+  }
   return data.profile;
 }
 
@@ -255,7 +284,9 @@ async function dbResetTeacherPassword(teacherId, newPassword) {
 async function dbDeleteTeacher(teacherId) {
   await _invokeTeacherFn({ action: "delete", teacher_id: teacherId });
   DB.profiles = DB.profiles.filter((p) => p.id !== teacherId);
+  DB.teacher_branches = DB.teacher_branches.filter((x) => x.teacher_id !== teacherId);
   DB.teacher_salaries = DB.teacher_salaries.filter((s) => s.teacher_id !== teacherId);
+  DB.monthly_salary_adjustments = DB.monthly_salary_adjustments.filter((s) => s.teacher_id !== teacherId);
   DB.schedules = DB.schedules.filter((s) => s.teacher_id !== teacherId);
 }
 
@@ -268,6 +299,30 @@ async function dbUpdateProfile(id, fields) {
   if (i !== -1) DB.profiles[i] = data;
   if (currentUser?.id === id) currentUser = data;
   return data;
+}
+
+async function dbSetTeacherBranches(teacherId, branchIds) {
+  const uniqueIds = [...new Set(branchIds)].filter(Boolean);
+  if (!uniqueIds.length) throw new Error("Chọn ít nhất một chi nhánh");
+  const currentIds = DB.teacher_branches
+    .filter((x) => x.teacher_id === teacherId)
+    .map((x) => x.branch_id);
+  const toRemove = currentIds.filter((id) => !uniqueIds.includes(id));
+  const rows = uniqueIds.map((branch_id) => ({ teacher_id: teacherId, branch_id }));
+
+  // Gửi toàn bộ danh sách bằng ON CONFLICT DO NOTHING để an toàn khi cache cục bộ
+  // chưa kịp phản ánh liên kết được tạo bởi trigger hoặc một trình duyệt khác.
+  const { error: upsertError } = await sb().from("teacher_branches")
+    .upsert(rows, { onConflict: "teacher_id,branch_id", ignoreDuplicates: true });
+  if (upsertError) throw upsertError;
+  if (toRemove.length) {
+    const { error } = await sb().from("teacher_branches")
+      .delete().eq("teacher_id", teacherId).in("branch_id", toRemove);
+    if (error) throw error;
+  }
+  DB.teacher_branches = DB.teacher_branches.filter((x) => x.teacher_id !== teacherId);
+  DB.teacher_branches.push(...rows);
+  return rows;
 }
 
 async function changeMyPassword(newPassword) {
@@ -300,6 +355,69 @@ async function dbDeleteSalary(id) {
 }
 
 // ============================================================
+// MONTHLY SALARY ADJUSTMENTS — phụ cấp/khấu trừ theo tháng
+// ============================================================
+
+function salaryAdjustmentMonth(month, year) {
+  return `${year}-${String(month).padStart(2, "0")}-01`;
+}
+
+function getMonthlySalaryAdjustment(teacherId, month, year) {
+  const adjustmentMonth = salaryAdjustmentMonth(month, year);
+  return DB.monthly_salary_adjustments.find(
+    (x) => x.teacher_id === teacherId && x.adjustment_month === adjustmentMonth,
+  ) || null;
+}
+
+async function dbSaveMonthlySalaryAdjustments(month, year, items) {
+  if (!items.length) return [];
+  const adjustmentMonth = salaryAdjustmentMonth(month, year);
+  const updatedAt = new Date().toISOString();
+  const rows = items.map((item) => ({
+    teacher_id: item.teacher_id,
+    adjustment_month: adjustmentMonth,
+    allowance: Number(item.allowance || 0),
+    deduction: Number(item.deduction || 0),
+    updated_at: updatedAt,
+  }));
+  const { data, error } = await sb().from("monthly_salary_adjustments")
+    .upsert(rows, { onConflict: "teacher_id,adjustment_month" }).select();
+  if (error) throw error;
+  const teacherIds = new Set(rows.map((x) => x.teacher_id));
+  DB.monthly_salary_adjustments = DB.monthly_salary_adjustments.filter(
+    (x) => x.adjustment_month !== adjustmentMonth || !teacherIds.has(x.teacher_id),
+  );
+  DB.monthly_salary_adjustments.push(...(data || rows));
+  return data || rows;
+}
+
+async function dbCopyMonthlySalaryAdjustments(fromMonth, fromYear, toMonth, toYear) {
+  const sourceMonth = salaryAdjustmentMonth(fromMonth, fromYear);
+  const targetMonth = salaryAdjustmentMonth(toMonth, toYear);
+  if (sourceMonth === targetMonth) throw new Error("Tháng nguồn và tháng đích phải khác nhau");
+  const sourceRows = DB.monthly_salary_adjustments.filter(
+    (x) => x.adjustment_month === sourceMonth,
+  );
+  if (!sourceRows.length) throw new Error("Tháng nguồn chưa có dữ liệu để sao chép");
+  const rows = sourceRows.map((x) => ({
+    teacher_id: x.teacher_id,
+    adjustment_month: targetMonth,
+    allowance: Number(x.allowance || 0),
+    deduction: Number(x.deduction || 0),
+    updated_at: new Date().toISOString(),
+  }));
+  const { data, error } = await sb().from("monthly_salary_adjustments")
+    .upsert(rows, { onConflict: "teacher_id,adjustment_month" }).select();
+  if (error) throw error;
+  const copiedTeacherIds = new Set(rows.map((x) => x.teacher_id));
+  DB.monthly_salary_adjustments = DB.monthly_salary_adjustments.filter(
+    (x) => x.adjustment_month !== targetMonth || !copiedTeacherIds.has(x.teacher_id),
+  );
+  DB.monthly_salary_adjustments.push(...(data || rows));
+  return data || rows;
+}
+
+// ============================================================
 // SCHEDULES — lịch dạy theo ngày cụ thể (admin xếp, GV cập nhật trạng thái)
 // status: scheduled -> in_progress (vào ca) -> completed (xong ca)
 // Quá ngày mà vẫn scheduled/in_progress = hôm đó không dạy.
@@ -315,6 +433,21 @@ async function dbAddSchedule(fields) {
   }
   DB.schedules.push(data);
   return data;
+}
+
+async function dbAddSchedules(items) {
+  if (!items.length) return [];
+  const { data, error } = await sb()
+    .from("schedules")
+    .upsert(items, {
+      onConflict: "teacher_id,sched_date,start_time",
+      ignoreDuplicates: true,
+    })
+    .select();
+  if (error) throw error;
+  const added = data || [];
+  DB.schedules.push(...added);
+  return added;
 }
 
 async function dbUpdateSchedule(id, fields) {
@@ -354,6 +487,31 @@ async function dbCompleteSchedule(id) {
   }
 }
 
+// Trạng thái "Đã hiểu" của nhắc lịch được lưu trên Supabase để đồng bộ
+// giữa các trình duyệt và thiết bị. RLS chỉ cho giáo viên đọc/ghi của mình.
+async function dbHasAcknowledgedScheduleNotice(noticeDate) {
+  const me = getCurrentUser();
+  if (!me) return false;
+  const { data, error } = await sb()
+    .from("schedule_notice_acknowledgements")
+    .select("teacher_id")
+    .eq("teacher_id", me.id)
+    .eq("notice_date", noticeDate)
+    .maybeSingle();
+  if (error) throw error;
+  return !!data;
+}
+
+async function dbAcknowledgeScheduleNotice(noticeDate) {
+  const me = getCurrentUser();
+  if (!me) throw new Error("Bạn chưa đăng nhập");
+  const { error } = await sb()
+    .from("schedule_notice_acknowledgements")
+    .insert({ teacher_id: me.id, notice_date: noticeDate });
+  // Hai tab có thể cùng xác nhận; trùng khóa vẫn được coi là đã lưu.
+  if (error && error.code !== "23505") throw error;
+}
+
 // ============================================================
 // READ HELPERS (đồng bộ, đọc từ cache)
 // ============================================================
@@ -370,9 +528,25 @@ function getProfile(id) {
   return DB.profiles.find((p) => p.id === id);
 }
 
+function getTeacherBranchIds(teacherId) {
+  const ids = DB.teacher_branches
+    .filter((x) => x.teacher_id === teacherId)
+    .map((x) => x.branch_id);
+  if (!ids.length) {
+    const legacyBranchId = getProfile(teacherId)?.branch_id;
+    if (legacyBranchId) ids.push(legacyBranchId);
+  }
+  return [...new Set(ids)];
+}
+
+function getTeacherBranches(teacherId) {
+  const ids = new Set(getTeacherBranchIds(teacherId));
+  return DB.branches.filter((b) => ids.has(b.id));
+}
+
 function getTeachers(branchId) {
   return DB.profiles.filter(
-    (p) => p.role === "teacher" && (!branchId || p.branch_id === branchId),
+    (p) => p.role === "teacher" && (!branchId || getTeacherBranchIds(p.id).includes(branchId)),
   );
 }
 
@@ -438,23 +612,34 @@ function getSchedulesInMonth(month, year, teacherId) {
 }
 
 // Tính lương tháng của 1 giáo viên (mirror của hàm SQL calc_teacher_salary):
-// fixed/mixed cộng lương cố định; per_session/mixed cộng đơn giá × số ca completed.
+// fixed/mixed chia lương tháng theo ca thực tế; per_session/mixed nhân đơn giá;
+// sau đó cộng phụ cấp và trừ khấu trừ.
 function calcTeacherSalary(teacherId, month, year) {
   const rate = getSalaryAsOf(teacherId, month, year);
+  const adjustment = getMonthlySalaryAdjustment(teacherId, month, year);
   const sessions = getSchedulesInMonth(month, year, teacherId);
   const assigned = sessions.length;
   const completed = sessions.filter((s) => s.status === "completed").length;
   const missed = sessions.filter((s) => displayStatus(s) === "missed").length;
 
   if (!rate) {
-    return { rate: null, assigned, completed, missed, total: null };
+    return {
+      rate: null, assigned, completed, missed,
+      baseEarned: 0, sessionEarned: 0, allowance: 0, deduction: 0, total: null,
+    };
   }
-  let total = 0;
-  if (rate.salary_type === "fixed" || rate.salary_type === "mixed")
-    total += Number(rate.base_salary || 0);
-  if (rate.salary_type === "per_session" || rate.salary_type === "mixed")
-    total += Number(rate.per_session_amount || 0) * completed;
-  return { rate, assigned, completed, missed, total };
+  const baseEarned =
+    (rate.salary_type === "fixed" || rate.salary_type === "mixed") && assigned
+      ? Math.round((Number(rate.base_salary || 0) * completed) / assigned)
+      : 0;
+  const sessionEarned =
+    rate.salary_type === "per_session" || rate.salary_type === "mixed"
+      ? Number(rate.per_session_amount || 0) * completed
+      : 0;
+  const allowance = Number(adjustment?.allowance || 0);
+  const deduction = Number(adjustment?.deduction || 0);
+  const total = baseEarned + sessionEarned + allowance - deduction;
+  return { rate, adjustment, assigned, completed, missed, baseEarned, sessionEarned, allowance, deduction, total };
 }
 
 // ============================================================

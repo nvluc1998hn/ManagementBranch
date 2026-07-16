@@ -54,6 +54,21 @@ alter table profiles
   add constraint profiles_branch_fk
   foreign key (branch_id) references branches(id) on delete set null;
 
+-- Một giáo viên có thể dạy tại nhiều chi nhánh. profiles.branch_id được giữ
+-- làm chi nhánh chính để tương thích dữ liệu và app_metadata cũ.
+create table if not exists teacher_branches (
+  teacher_id uuid not null references profiles(id) on delete cascade,
+  branch_id  uuid not null references branches(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (teacher_id, branch_id)
+);
+
+-- Tự chuyển dữ liệu một-chi-nhánh cũ sang bảng liên kết.
+insert into teacher_branches (teacher_id, branch_id)
+select id, branch_id from profiles
+where role = 'teacher' and branch_id is not null
+on conflict do nothing;
+
 -- ============================================================
 -- 3. SUBJECTS — môn học thuộc chi nhánh
 -- ============================================================
@@ -91,6 +106,49 @@ create table if not exists teacher_salaries (
   unique (teacher_id, effective_from)
 );
 
+-- Phụ cấp/khấu trừ là dữ liệu riêng theo từng tháng, không thuộc lịch sử mức lương.
+create table if not exists monthly_salary_adjustments (
+  teacher_id       uuid not null references profiles(id) on delete cascade,
+  adjustment_month date not null,
+  allowance        numeric(12,0) not null default 0 check (allowance >= 0),
+  deduction        numeric(12,0) not null default 0 check (deduction >= 0),
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  primary key (teacher_id, adjustment_month),
+  constraint adjustment_month_first_day check (
+    adjustment_month = date_trunc('month', adjustment_month)::date
+  )
+);
+
+-- Nếu đã chạy bản schema cũ có 2 cột trên teacher_salaries, chuyển dữ liệu
+-- gần nhất của từng tháng sang bảng mới trước khi bỏ cột cũ.
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'teacher_salaries' and column_name = 'allowance'
+  ) and exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'teacher_salaries' and column_name = 'deduction'
+  ) then
+    insert into monthly_salary_adjustments (teacher_id, adjustment_month, allowance, deduction)
+    select distinct on (teacher_id, date_trunc('month', effective_from))
+           teacher_id, date_trunc('month', effective_from)::date,
+           coalesce(allowance, 0), coalesce(deduction, 0)
+    from teacher_salaries
+    where coalesce(allowance, 0) <> 0 or coalesce(deduction, 0) <> 0
+    order by teacher_id, date_trunc('month', effective_from), effective_from desc
+    on conflict (teacher_id, adjustment_month) do update
+      set allowance = excluded.allowance,
+          deduction = excluded.deduction,
+          updated_at = now();
+  end if;
+end $$;
+
+alter table teacher_salaries drop constraint if exists salary_adjustments_check;
+alter table teacher_salaries drop column if exists allowance;
+alter table teacher_salaries drop column if exists deduction;
+
 -- ============================================================
 -- 5. SCHEDULES — lịch dạy theo NGÀY CỤ THỂ + trạng thái ca
 --    scheduled -> in_progress (Vào ca) -> completed (Xong ca)
@@ -113,10 +171,23 @@ create table if not exists schedules (
   unique (teacher_id, sched_date, start_time)
 );
 
+-- ============================================================
+-- 5B. SCHEDULE_NOTICE_ACKNOWLEDGEMENTS — giáo viên xác nhận đã
+--     đọc nhắc lịch theo ngày, đồng bộ trên mọi trình duyệt/thiết bị
+-- ============================================================
+create table if not exists schedule_notice_acknowledgements (
+  teacher_id     uuid not null references profiles(id) on delete cascade,
+  notice_date    date not null,
+  acknowledged_at timestamptz not null default now(),
+  primary key (teacher_id, notice_date)
+);
+
 create index if not exists schedules_teacher_date_idx on schedules (teacher_id, sched_date);
 create index if not exists schedules_branch_date_idx  on schedules (branch_id, sched_date);
 create index if not exists profiles_branch_idx        on profiles (branch_id);
+create index if not exists teacher_branches_branch_idx on teacher_branches (branch_id, teacher_id);
 create index if not exists salaries_teacher_idx       on teacher_salaries (teacher_id, effective_from desc);
+create index if not exists salary_adjustments_month_idx on monthly_salary_adjustments (adjustment_month, teacher_id);
 
 -- ============================================================
 -- 6. TRIGGER: tự tạo profile khi có auth user mới
@@ -151,6 +222,11 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function handle_new_user();
 
+-- Liên kết chi nhánh được Edge Function/client ghi tường minh. Trigger cũ từng tự chèn
+-- chi nhánh chính trước Edge Function, khiến lần chèn danh sách ngay sau đó bị trùng khóa chính.
+drop trigger if exists sync_primary_teacher_branch_trg on profiles;
+drop function if exists sync_primary_teacher_branch();
+
 -- Quyền để trigger chạy được khi service Auth (supabase_auth_admin) insert
 -- user mới — thiếu 2 grant này sẽ gặp "Database error saving new user" (500).
 grant usage on schema public to supabase_auth_admin;
@@ -172,6 +248,14 @@ create or replace function my_branch() returns uuid
 language sql stable security definer set search_path = public as
 $$ select branch_id from profiles where id = auth.uid() $$;
 
+-- Giáo viên hiện tại có được phân công tại chi nhánh này không?
+create or replace function teacher_has_branch(b uuid) returns boolean
+language sql stable security definer set search_path = public as
+$$ select exists(
+     select 1 from teacher_branches tb
+     where tb.teacher_id = auth.uid() and tb.branch_id = b
+   ) $$;
+
 -- Admin có sở hữu chi nhánh này không?
 create or replace function owns_branch(b uuid) returns boolean
 language sql stable security definer set search_path = public as
@@ -182,7 +266,8 @@ create or replace function owns_teacher(t uuid) returns boolean
 language sql stable security definer set search_path = public as
 $$ select exists(
      select 1 from profiles p
-     join branches b on b.id = p.branch_id
+     join teacher_branches tb on tb.teacher_id = p.id
+     join branches b on b.id = tb.branch_id
      where p.id = t and p.role = 'teacher' and b.owner_admin_id = auth.uid()
    ) $$;
 
@@ -222,7 +307,8 @@ language plpgsql security definer set search_path = public as $$
 begin
   if not exists (
     select 1 from profiles p
-    where p.id = new.teacher_id and p.role = 'teacher' and p.branch_id = new.branch_id
+    join teacher_branches tb on tb.teacher_id = p.id
+    where p.id = new.teacher_id and p.role = 'teacher' and tb.branch_id = new.branch_id
   ) then
     raise exception 'Giáo viên không thuộc chi nhánh này';
   end if;
@@ -247,7 +333,10 @@ alter table profiles         enable row level security;
 alter table branches         enable row level security;
 alter table subjects         enable row level security;
 alter table teacher_salaries enable row level security;
+alter table monthly_salary_adjustments enable row level security;
 alter table schedules        enable row level security;
+alter table teacher_branches enable row level security;
+alter table schedule_notice_acknowledgements enable row level security;
 
 -- PROFILES ---------------------------------------------------
 drop policy if exists "profiles read"  on profiles;
@@ -256,7 +345,7 @@ drop policy if exists "profiles admin update" on profiles;
 
 -- đọc: chính mình + admin đọc GV thuộc chi nhánh mình
 create policy "profiles read" on profiles for select
-  using (id = auth.uid() or owns_branch(branch_id));
+  using (id = auth.uid() or owns_teacher(id));
 
 -- tự sửa hồ sơ (trigger protect_profile_fields chặn đổi role/branch)
 create policy "profiles update self" on profiles for update
@@ -264,7 +353,7 @@ create policy "profiles update self" on profiles for update
 
 -- admin sửa GV trong chi nhánh mình (kể cả chuyển sang chi nhánh khác của mình)
 create policy "profiles admin update" on profiles for update
-  using (owns_branch(branch_id)) with check (owns_branch(branch_id));
+  using (owns_teacher(id)) with check (role = 'teacher' and owns_branch(branch_id));
 
 -- insert/delete profiles: chỉ Edge Function (service role) + trigger — không có policy
 
@@ -277,7 +366,7 @@ drop policy if exists "branches delete" on branches;
 create policy "branches insert" on branches for insert
   with check (is_admin() and owner_admin_id = auth.uid());
 create policy "branches read" on branches for select
-  using (owner_admin_id = auth.uid() or id = my_branch());
+  using (owner_admin_id = auth.uid() or teacher_has_branch(id));
 create policy "branches update" on branches for update
   using (owner_admin_id = auth.uid());
 create policy "branches delete" on branches for delete
@@ -288,7 +377,7 @@ drop policy if exists "subjects read"  on subjects;
 drop policy if exists "subjects write" on subjects;
 
 create policy "subjects read" on subjects for select
-  using (owns_branch(branch_id) or branch_id = my_branch());
+  using (owns_branch(branch_id) or teacher_has_branch(branch_id));
 create policy "subjects write" on subjects for all
   using (owns_branch(branch_id)) with check (owns_branch(branch_id));
 
@@ -301,6 +390,15 @@ create policy "salaries teacher read" on teacher_salaries for select
 create policy "salaries admin all" on teacher_salaries for all
   using (owns_teacher(teacher_id)) with check (owns_teacher(teacher_id));
 
+-- MONTHLY_SALARY_ADJUSTMENTS ---------------------------------
+drop policy if exists "adjustments teacher read" on monthly_salary_adjustments;
+drop policy if exists "adjustments admin all" on monthly_salary_adjustments;
+
+create policy "adjustments teacher read" on monthly_salary_adjustments for select
+  using (teacher_id = auth.uid());
+create policy "adjustments admin all" on monthly_salary_adjustments for all
+  using (owns_teacher(teacher_id)) with check (owns_teacher(teacher_id));
+
 -- SCHEDULES --------------------------------------------------
 -- Giáo viên chỉ ĐỌC lịch của mình; đổi trạng thái qua RPC bên dưới
 -- (không có policy update cho GV → không sửa được giờ/ngày/lịch người khác).
@@ -311,6 +409,29 @@ create policy "schedules teacher read" on schedules for select
   using (teacher_id = auth.uid());
 create policy "schedules admin all" on schedules for all
   using (owns_branch(branch_id)) with check (owns_branch(branch_id));
+
+-- TEACHER_BRANCHES -------------------------------------------
+drop policy if exists "teacher branches read" on teacher_branches;
+drop policy if exists "teacher branches admin insert" on teacher_branches;
+drop policy if exists "teacher branches admin delete" on teacher_branches;
+
+create policy "teacher branches read" on teacher_branches for select
+  using (teacher_id = auth.uid() or owns_branch(branch_id));
+create policy "teacher branches admin insert" on teacher_branches for insert
+  with check (owns_branch(branch_id) and owns_teacher(teacher_id));
+create policy "teacher branches admin delete" on teacher_branches for delete
+  using (owns_branch(branch_id));
+
+-- SCHEDULE NOTICE ACKNOWLEDGEMENTS ---------------------------
+-- Giáo viên chỉ đọc và tạo xác nhận của chính mình. Admin không cần
+-- truy cập bảng này vì đây là trạng thái UI cá nhân của giáo viên.
+drop policy if exists "schedule notice teacher read" on schedule_notice_acknowledgements;
+drop policy if exists "schedule notice teacher insert" on schedule_notice_acknowledgements;
+
+create policy "schedule notice teacher read" on schedule_notice_acknowledgements for select
+  using (teacher_id = auth.uid());
+create policy "schedule notice teacher insert" on schedule_notice_acknowledgements for insert
+  with check (teacher_id = auth.uid());
 
 -- ============================================================
 -- 11. RPC: Vào ca / Xong ca (security definer — bỏ qua việc GV
@@ -349,13 +470,16 @@ end $$;
 
 -- ============================================================
 -- 12. RPC tính lương tháng (tham khảo — client cũng tự tính từ cache):
---     fixed/mixed cộng lương cố định; per_session/mixed cộng
---     đơn giá × số ca completed. Mức lương lấy lần chốt gần nhất
---     tính đến cuối tháng.
+--     fixed/mixed chia lương tháng theo ca xếp × ca completed;
+--     per_session/mixed cộng đơn giá × ca completed; cuối cùng cộng
+--     phụ cấp và trừ khấu trừ. Mức lương lấy lần chốt gần nhất.
 -- ============================================================
-create or replace function calc_teacher_salary(p_teacher_id uuid, p_month int, p_year int)
+drop function if exists calc_teacher_salary(uuid, int, int);
+create function calc_teacher_salary(p_teacher_id uuid, p_month int, p_year int)
 returns table (salary_type text, base_salary numeric, per_session_amount numeric,
-               sessions_completed bigint, total numeric)
+               sessions_assigned bigint, sessions_completed bigint,
+               base_earned numeric, session_earned numeric,
+               allowance numeric, deduction numeric, total numeric)
 language plpgsql stable security definer set search_path = public as $$
 begin
   if auth.uid() is distinct from p_teacher_id and not owns_teacher(p_teacher_id) then
@@ -369,17 +493,33 @@ begin
       and ts.effective_from <= (make_date(p_year, p_month, 1) + interval '1 month - 1 day')::date
     order by ts.effective_from desc limit 1
   ),
-  done as (
-    select count(*) as n from schedules s
-    where s.teacher_id = p_teacher_id and s.status = 'completed'
+  stats as (
+    select count(*) as assigned,
+           count(*) filter (where s.status = 'completed') as completed
+    from schedules s
+    where s.teacher_id = p_teacher_id
       and extract(month from s.sched_date) = p_month
       and extract(year  from s.sched_date) = p_year
+  ),
+  adjustments as (
+    select msa.allowance, msa.deduction
+    from monthly_salary_adjustments msa
+    where msa.teacher_id = p_teacher_id
+      and msa.adjustment_month = make_date(p_year, p_month, 1)
   )
-  select r.salary_type, r.base_salary, r.per_session_amount, d.n,
-         coalesce(case when r.salary_type in ('fixed','mixed') then r.base_salary end, 0)
+  select r.salary_type, r.base_salary, r.per_session_amount,
+         s.assigned, s.completed,
+         coalesce(case when r.salary_type in ('fixed','mixed') and s.assigned > 0
+                       then r.base_salary * s.completed / s.assigned end, 0) as base_earned,
+         coalesce(case when r.salary_type in ('per_session','mixed')
+                       then r.per_session_amount * s.completed end, 0) as session_earned,
+         coalesce(a.allowance, 0), coalesce(a.deduction, 0),
+         coalesce(case when r.salary_type in ('fixed','mixed') and s.assigned > 0
+                       then r.base_salary * s.completed / s.assigned end, 0)
        + coalesce(case when r.salary_type in ('per_session','mixed')
-                       then r.per_session_amount * d.n end, 0)
-  from rate r, done d;
+                       then r.per_session_amount * s.completed end, 0)
+       + coalesce(a.allowance, 0) - coalesce(a.deduction, 0)
+  from rate r cross join stats s left join adjustments a on true;
 end $$;
 
 -- ============================================================
@@ -395,12 +535,16 @@ end $$;
 -- drop function if exists owns_teacher(uuid);
 -- drop function if exists owns_branch(uuid);
 -- drop function if exists my_branch();
+-- drop function if exists teacher_has_branch(uuid);
 -- drop function if exists is_admin();
 -- drop function if exists my_role();
 -- drop trigger if exists on_auth_user_created on auth.users;
 -- drop function if exists handle_new_user();
+-- drop table if exists schedule_notice_acknowledgements;
 -- drop table if exists schedules;
+-- drop table if exists monthly_salary_adjustments;
 -- drop table if exists teacher_salaries;
 -- drop table if exists subjects;
+-- drop table if exists teacher_branches;
 -- drop table if exists branches;
 -- drop table if exists profiles;

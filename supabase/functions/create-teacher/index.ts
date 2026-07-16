@@ -8,7 +8,7 @@
 //  được Supabase tự inject, không cần khai báo secret)
 //
 // Body:
-//   { action: "create", email, password, full_name, phone?, branch_id }
+//   { action: "create", email, password, full_name, phone?, branch_ids[] }
 //   { action: "reset_password", teacher_id, password }
 //   { action: "delete", teacher_id }
 // Trả về: { profile } khi create, { ok: true } khi còn lại,
@@ -74,29 +74,42 @@ Deno.serve(async (req) => {
       return !!data;
     };
 
-    // Giáo viên thuộc chi nhánh do admin này sở hữu?
+    // Giáo viên có ít nhất một chi nhánh do admin này sở hữu?
     const ownedTeacher = async (teacherId: string) => {
       const { data: t } = await admin
         .from("profiles")
-        .select("id, role, branch_id")
+        .select("id, role")
         .eq("id", teacherId)
         .maybeSingle();
-      if (!t || t.role !== "teacher" || !t.branch_id) return null;
-      return (await ownsBranch(t.branch_id)) ? t : null;
+      if (!t || t.role !== "teacher") return null;
+      const { data: links } = await admin
+        .from("teacher_branches")
+        .select("branch_id")
+        .eq("teacher_id", teacherId);
+      for (const link of links || []) {
+        if (await ownsBranch(link.branch_id)) return t;
+      }
+      return null;
     };
 
     // ---- CREATE ------------------------------------------------
     if (action === "create") {
-      const { email, password, full_name, phone, branch_id } = body;
-      if (!email || !password || !full_name || !branch_id) {
+      const { email, password, full_name, phone } = body;
+      const branchIds = [...new Set(
+        (Array.isArray(body.branch_ids) ? body.branch_ids : [body.branch_id]).filter(Boolean),
+      )] as string[];
+      if (!email || !password || !full_name || !branchIds.length) {
         return json({ error: "Thiếu thông tin bắt buộc" }, 400);
       }
       if (String(password).length < 6) {
         return json({ error: "Mật khẩu phải có ít nhất 6 ký tự" }, 400);
       }
-      if (!(await ownsBranch(branch_id))) {
-        return json({ error: "Chi nhánh không thuộc quyền quản lý của bạn" }, 403);
+      for (const branchId of branchIds) {
+        if (!(await ownsBranch(branchId))) {
+          return json({ error: "Có chi nhánh không thuộc quyền quản lý của bạn" }, 403);
+        }
       }
+      const primaryBranchId = branchIds[0];
       // role + branch_id đặt trong app_metadata (client không tự đặt được),
       // trigger handle_new_user sẽ tạo dòng profiles tương ứng.
       const { data: created, error: createErr } =
@@ -105,7 +118,7 @@ Deno.serve(async (req) => {
           password,
           email_confirm: true,
           user_metadata: { full_name, phone: phone ?? null },
-          app_metadata: { role: "teacher", branch_id },
+          app_metadata: { role: "teacher", branch_id: primaryBranchId, branch_ids: branchIds },
         });
       if (createErr) {
         const msg = /already.*registered|already exists/i.test(createErr.message)
@@ -126,14 +139,34 @@ Deno.serve(async (req) => {
             full_name,
             phone: phone ?? null,
             email,
-            branch_id,
+            branch_id: primaryBranchId,
           },
           { onConflict: "id" },
         )
         .select()
         .single();
       if (profErr) return json({ error: profErr.message }, 500);
-      return json({ profile });
+      const { error: branchErr } = await admin
+        .from("teacher_branches")
+        .upsert(
+          branchIds.map((branch_id) => ({ teacher_id: created.user.id, branch_id })),
+          { onConflict: "teacher_id,branch_id", ignoreDuplicates: true },
+        );
+      if (branchErr) {
+        await admin.auth.admin.deleteUser(created.user.id);
+        return json({ error: branchErr.message }, 500);
+      }
+      // Đọc lại toàn bộ liên kết vì dòng chi nhánh chính có thể đã được trigger tạo trước,
+      // nên upsert ở trên sẽ bỏ qua dòng đó và không trả về trong representation.
+      const { data: teacherBranches, error: branchReadErr } = await admin
+        .from("teacher_branches")
+        .select("*")
+        .eq("teacher_id", created.user.id);
+      if (branchReadErr) {
+        await admin.auth.admin.deleteUser(created.user.id);
+        return json({ error: branchReadErr.message }, 500);
+      }
+      return json({ profile, teacher_branches: teacherBranches });
     }
 
     // ---- RESET PASSWORD ---------------------------------------

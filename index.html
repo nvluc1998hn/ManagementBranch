@@ -18,7 +18,7 @@
 <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
 <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600&family=Playfair+Display:wght@500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=17">
 </head>
 <body>
 <div class="app-layout">
@@ -38,12 +38,29 @@
       <a href="#" class="nav-item nav-admin" data-page="teachers">
         <i class="ti ti-users"></i><span>Giáo viên</span>
       </a>
+      <a href="#" class="nav-item nav-admin" data-page="salary-adjustments">
+        <i class="ti ti-adjustments-dollar"></i><span>Phụ cấp & khấu trừ</span>
+      </a>
       <a href="#" class="nav-item" data-page="schedule">
         <i class="ti ti-calendar-time"></i><span>Thời khóa biểu</span>
       </a>
-      <a href="#" class="nav-item" data-page="report">
-        <i class="ti ti-chart-bar"></i><span>Báo cáo</span>
-      </a>
+      <div class="nav-group" id="reportNavGroup">
+        <button type="button" class="nav-group-toggle" onclick="toggleReportNav()">
+          <i class="ti ti-chart-bar"></i><span>Báo cáo</span>
+          <i class="ti ti-chevron-down nav-group-chevron"></i>
+        </button>
+        <div class="nav-submenu">
+          <a href="#" class="nav-item nav-sub-item nav-admin" data-page="report-branch">
+            <i class="ti ti-building-community"></i><span>Theo chi nhánh</span>
+          </a>
+          <a href="#" class="nav-item nav-sub-item" data-page="report-teacher">
+            <i class="ti ti-user-check"></i><span>Theo giáo viên</span>
+          </a>
+          <a href="#" class="nav-item nav-sub-item" data-page="report-salary">
+            <i class="ti ti-coin"></i><span>Báo cáo lương</span>
+          </a>
+        </div>
+      </div>
       <a href="#" class="nav-item" data-page="account">
         <i class="ti ti-user-circle"></i><span>Tài khoản</span>
       </a>
@@ -102,14 +119,15 @@
   <div class="more-drawer-inner">
     <a href="#" class="more-drawer-item nav-admin" data-page="branches"><i class="ti ti-building-community"></i> Chi nhánh</a>
     <a href="#" class="more-drawer-item nav-admin" data-page="teachers"><i class="ti ti-users"></i> Giáo viên</a>
+    <a href="#" class="more-drawer-item nav-admin" data-page="salary-adjustments"><i class="ti ti-adjustments-dollar"></i> Phụ cấp & khấu trừ</a>
     <a href="#" class="more-drawer-item" data-page="account"><i class="ti ti-user-circle"></i> Tài khoản</a>
   </div>
 </div>
 <div class="more-drawer-overlay" id="moreDrawerOverlay"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="data.js"></script>
-<script src="app.js"></script>
+<script src="data.js?v=17"></script>
+<script src="app.js?v=17"></script>
 <script>
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});
