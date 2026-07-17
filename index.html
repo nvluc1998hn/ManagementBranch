@@ -18,15 +18,15 @@
 <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
 <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@300;400;500;600&family=Playfair+Display:wght@500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
-<link rel="stylesheet" href="style.css?v=17">
+<link rel="stylesheet" href="style.css?v=24">
 </head>
 <body>
 <div class="app-layout">
   <!-- Sidebar -->
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-logo">
-      <span class="logo-icon"><i class="ti ti-building-community"></i></span>
-      <span class="logo-text">EduBranch</span>
+      <span class="logo-image"><img src="assets/tnl-logo.jpg" alt="Logo TNL"></span>
+      <span class="logo-text">EduTrack</span>
     </div>
     <nav class="sidebar-nav">
       <a href="#" class="nav-item active" data-page="dashboard">
@@ -126,8 +126,9 @@
 <div class="more-drawer-overlay" id="moreDrawerOverlay"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-<script src="data.js?v=17"></script>
-<script src="app.js?v=17"></script>
+<script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+<script src="data.js?v=24"></script>
+<script src="app.js?v=24"></script>
 <script>
   if ('serviceWorker' in navigator) {
     navigator.serviceWorker.register('/sw.js').catch(() => {});

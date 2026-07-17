@@ -436,9 +436,9 @@ function showLoginPage() {
     <div class="login-page">
       <div class="login-card">
         <div class="login-brand">
-          <span class="logo-icon"><i class="ti ti-building-community"></i></span>
+          <span class="logo-image"><img src="assets/tnl-logo.jpg" alt="Logo TNL"></span>
           <div>
-            <div class="login-title">EduBranch</div>
+            <div class="login-title">EduTrack</div>
             <div class="login-subtitle">Quản lý chi nhánh, giáo viên & lịch dạy</div>
           </div>
         </div>
@@ -1611,6 +1611,8 @@ function copyPrevWeek() {
 let reportMonth = new Date().getMonth() + 1;
 let reportYear = new Date().getFullYear();
 let reportBranchFilter = "";
+let reportTeacherBranchFilters = null; // null = tất cả; [] = chưa chọn chi nhánh nào
+let reportTeacherNameFilter = "";
 
 const REPORT_VIEW_LABELS = {
   branch: "Theo chi nhánh",
@@ -1832,16 +1834,198 @@ async function copySalaryAdjustments(e) {
   }
 }
 
+function setAllTeacherReportBranchCheckboxes(checked) {
+  document.querySelectorAll('input[name="report-teacher-branch"]')
+    .forEach((input) => { input.checked = checked; });
+}
+
+function applyTeacherReportBranchFilters() {
+  const selectedIds = [...document.querySelectorAll('input[name="report-teacher-branch"]:checked')]
+    .map((input) => input.value);
+  reportTeacherBranchFilters = selectedIds.length === DB.branches.length ? null : selectedIds;
+  renderPage("report-teacher");
+}
+
+function filterTeacherReportRows(value) {
+  reportTeacherNameFilter = value || "";
+  const query = normalizeAdjustmentSearch(reportTeacherNameFilter);
+  let visibleCount = 0;
+  document.querySelectorAll("[data-teacher-report-row]").forEach((row) => {
+    const matches = !query || (row.dataset.teacherSearch || "").includes(query);
+    row.hidden = !matches;
+    if (matches) visibleCount += 1;
+  });
+
+  const tableWrap = document.getElementById("teacher-report-table-wrap");
+  const emptyState = document.getElementById("teacher-report-empty");
+  const emptyMessage = document.getElementById("teacher-report-empty-message");
+  if (tableWrap) tableWrap.hidden = visibleCount === 0;
+  if (emptyState) emptyState.hidden = visibleCount > 0;
+  if (emptyMessage) {
+    emptyMessage.textContent = query
+      ? "Không tìm thấy giáo viên phù hợp"
+      : "Chưa có tiết đã hoàn thành trong tháng";
+  }
+}
+
+function getReportCompletedSessions(view) {
+  const me = getCurrentUser();
+  let sessions = getSchedulesInMonth(reportMonth, reportYear, isAdmin() ? null : me.id);
+  if (isAdmin() && view === "teacher" && Array.isArray(reportTeacherBranchFilters)) {
+    sessions = sessions.filter((schedule) => reportTeacherBranchFilters.includes(schedule.branch_id));
+  } else if (isAdmin() && reportBranchFilter) {
+    sessions = sessions.filter((schedule) => schedule.branch_id === reportBranchFilter);
+  }
+  return sessions
+    .filter((schedule) => schedule.status === "completed")
+    .sort((a, b) => a.sched_date.localeCompare(b.sched_date) || a.start_time.localeCompare(b.start_time));
+}
+
+function reportExportFilterLabel(view) {
+  if (view === "teacher" && isAdmin()) {
+    const selectedBranches = reportTeacherBranchFilters === null
+      ? DB.branches
+      : DB.branches.filter((branch) => reportTeacherBranchFilters.includes(branch.id));
+    const branchLabel = reportTeacherBranchFilters === null
+      ? "Tất cả chi nhánh"
+      : selectedBranches.length
+        ? selectedBranches.map((branch) => branch.name).join(", ")
+        : "Không chọn chi nhánh";
+    return `Chi nhánh: ${branchLabel}${reportTeacherNameFilter.trim() ? ` | Tên giáo viên: ${reportTeacherNameFilter.trim()}` : ""}`;
+  }
+  if (isAdmin()) {
+    return `Chi nhánh: ${reportBranchFilter ? (getBranch(reportBranchFilter)?.name || "Không xác định") : "Tất cả chi nhánh"}`;
+  }
+  return `Giáo viên: ${getCurrentUser()?.full_name || getProfile(getCurrentUser()?.id)?.full_name || "Tài khoản hiện tại"}`;
+}
+
+function exportReportExcel(view) {
+  if (!window.XLSX) {
+    showToast("Không tải được thư viện xuất Excel. Vui lòng kiểm tra kết nối mạng và thử lại.", "error");
+    return;
+  }
+
+  const reportConfigs = {
+    branch: { title: "BÁO CÁO THEO CHI NHÁNH", sheet: "Theo chi nhánh", file: "bao-cao-chi-nhanh" },
+    teacher: { title: "BÁO CÁO THEO GIÁO VIÊN", sheet: "Theo giáo viên", file: "bao-cao-giao-vien" },
+    salary: { title: "BÁO CÁO LƯƠNG", sheet: "Báo cáo lương", file: "bao-cao-luong" },
+  };
+  const config = reportConfigs[view];
+  if (!config) return;
+
+  let headers = [];
+  let dataRows = [];
+  let moneyColumns = [];
+
+  if (view === "branch" || view === "teacher") {
+    let completedSessions = getReportCompletedSessions(view);
+    const totals = new Map();
+    completedSessions.forEach((schedule) => {
+      const totalKey = view === "branch" ? schedule.branch_id : schedule.teacher_id;
+      totals.set(totalKey, (totals.get(totalKey) || 0) + 1);
+    });
+    if (view === "teacher") {
+      const nameQuery = normalizeAdjustmentSearch(reportTeacherNameFilter);
+      if (nameQuery) {
+        completedSessions = completedSessions.filter((schedule) => {
+          const teacherName = getProfile(schedule.teacher_id)?.full_name || "";
+          return normalizeAdjustmentSearch(teacherName).includes(nameQuery);
+        });
+      }
+      headers = ["Giáo viên", "Ngày dạy", "Giờ ca dạy", "Chi nhánh", "Môn học", "Tổng tiết tháng"];
+      dataRows = completedSessions.map((schedule) => [
+        getProfile(schedule.teacher_id)?.full_name || "?",
+        formatDate(schedule.sched_date),
+        `${formatTime(schedule.start_time)} – ${formatTime(schedule.end_time)}`,
+        getBranch(schedule.branch_id)?.name || "?",
+        getSubject(schedule.subject_id)?.name || "?",
+        totals.get(schedule.teacher_id) || 0,
+      ]);
+    } else {
+      headers = ["Chi nhánh", "Ngày dạy", "Giờ ca dạy", "Giáo viên", "Môn học", "Tổng tiết tháng"];
+      dataRows = completedSessions.map((schedule) => [
+        getBranch(schedule.branch_id)?.name || "?",
+        formatDate(schedule.sched_date),
+        `${formatTime(schedule.start_time)} – ${formatTime(schedule.end_time)}`,
+        getProfile(schedule.teacher_id)?.full_name || "?",
+        getSubject(schedule.subject_id)?.name || "?",
+        totals.get(schedule.branch_id) || 0,
+      ]);
+    }
+  } else {
+    const teachers = (isAdmin() ? getTeachers(reportBranchFilter || null) : [getProfile(getCurrentUser().id)]).filter(Boolean);
+    headers = ["Giáo viên", "Chi nhánh", "Loại lương", "Ca xếp", "Ca thực tế", "Lương tháng theo ca", "Lương tiết", "Phụ cấp", "Khấu trừ", "Thực nhận"];
+    let grandTotal = 0;
+    dataRows = teachers.map((teacher) => {
+      const salary = calcTeacherSalary(teacher.id, reportMonth, reportYear);
+      if (salary.total != null) grandTotal += salary.total;
+      return [
+        teacher.full_name || "?",
+        getTeacherBranches(teacher.id).map((branch) => branch.name).join(", ") || "—",
+        salary.rate ? SALARY_TYPE_LABELS[salary.rate.salary_type] : "Chưa chốt lương",
+        salary.assigned,
+        salary.completed,
+        salary.rate ? salary.baseEarned : null,
+        salary.rate ? salary.sessionEarned : null,
+        salary.rate ? salary.allowance : null,
+        salary.rate ? salary.deduction : null,
+        salary.total,
+      ];
+    });
+    if (isAdmin() && dataRows.length) {
+      dataRows.push(["TỔNG CỘNG", "", "", "", "", "", "", "", "", grandTotal]);
+    }
+    moneyColumns = [5, 6, 7, 8, 9];
+  }
+
+  if (!dataRows.length) {
+    showToast("Không có dữ liệu phù hợp để xuất Excel", "error");
+    return;
+  }
+
+  const metadataRows = [
+    [config.title],
+    [`Kỳ báo cáo: Tháng ${reportMonth}/${reportYear}`],
+    [reportExportFilterLabel(view)],
+    [],
+  ];
+  const worksheetRows = [...metadataRows, headers, ...dataRows];
+  const worksheet = XLSX.utils.aoa_to_sheet(worksheetRows);
+  const lastColumn = Math.max(0, headers.length - 1);
+  worksheet["!merges"] = [0, 1, 2].map((row) => ({ s: { r: row, c: 0 }, e: { r: row, c: lastColumn } }));
+  worksheet["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 4, c: 0 }, e: { r: 4 + dataRows.length, c: lastColumn } }) };
+  worksheet["!cols"] = headers.map((header, columnIndex) => {
+    const maxLength = worksheetRows.reduce((max, row) => Math.max(max, String(row[columnIndex] ?? "").length), header.length);
+    return { wch: Math.min(Math.max(maxLength + 2, 12), 36) };
+  });
+  moneyColumns.forEach((columnIndex) => {
+    for (let rowIndex = 5; rowIndex < 5 + dataRows.length; rowIndex += 1) {
+      const cell = worksheet[XLSX.utils.encode_cell({ r: rowIndex, c: columnIndex })];
+      if (cell && typeof cell.v === "number") cell.z = '#,##0 "đ"';
+    }
+  });
+
+  const workbook = XLSX.utils.book_new();
+  workbook.Props = { Title: config.title, Author: "EduBranch", CreatedDate: new Date() };
+  XLSX.utils.book_append_sheet(workbook, worksheet, config.sheet);
+  const monthLabel = String(reportMonth).padStart(2, "0");
+  try {
+    XLSX.writeFile(workbook, `${config.file}-${monthLabel}-${reportYear}.xlsx`, { compression: true });
+    showToast("Đã tạo file Excel", "success");
+  } catch (error) {
+    console.error(error);
+    showToast("Không thể xuất file Excel", "error");
+  }
+}
+
 function report(view) {
   const me = getCurrentUser();
-  const teachers = (isAdmin() ? getTeachers(reportBranchFilter || null) : [getProfile(me.id)]).filter(Boolean);
-  let monthSessions = getSchedulesInMonth(reportMonth, reportYear, isAdmin() ? null : me.id);
-  if (isAdmin() && reportBranchFilter) {
-    monthSessions = monthSessions.filter((s) => s.branch_id === reportBranchFilter);
+  if (Array.isArray(reportTeacherBranchFilters)) {
+    const validIds = new Set(DB.branches.map((branch) => branch.id));
+    reportTeacherBranchFilters = reportTeacherBranchFilters.filter((id) => validIds.has(id));
   }
-  const completedSessions = monthSessions
-    .filter((s) => s.status === "completed")
-    .sort((a, b) => a.sched_date.localeCompare(b.sched_date) || a.start_time.localeCompare(b.start_time));
+  const teachers = (isAdmin() ? getTeachers(reportBranchFilter || null) : [getProfile(me.id)]).filter(Boolean);
+  const completedSessions = getReportCompletedSessions(view);
 
   const branchTotals = new Map();
   const teacherTotals = new Map();
@@ -1859,14 +2043,22 @@ function report(view) {
     <td><span class="badge badge-green">${branchTotals.get(s.branch_id)}</span></td>
   </tr>`).join("");
 
-  const teacherReportRows = completedSessions.map((s) => `<tr>
-    <td><b>${escapeHtml(getProfile(s.teacher_id)?.full_name || "?")}</b></td>
-    <td>${formatDate(s.sched_date)}</td>
-    <td><b>${formatTime(s.start_time)} – ${formatTime(s.end_time)}</b></td>
-    <td>${escapeHtml(getBranch(s.branch_id)?.name || "?")}</td>
-    <td>${escapeHtml(getSubject(s.subject_id)?.name || "?")}</td>
-    <td><span class="badge badge-green">${teacherTotals.get(s.teacher_id)}</span></td>
-  </tr>`).join("");
+  const normalizedTeacherNameFilter = normalizeAdjustmentSearch(reportTeacherNameFilter);
+  let teacherReportMatchCount = 0;
+  const teacherReportRows = completedSessions.map((s) => {
+    const teacherName = getProfile(s.teacher_id)?.full_name || "?";
+    const teacherSearch = normalizeAdjustmentSearch(teacherName);
+    const matchesTeacherName = !normalizedTeacherNameFilter || teacherSearch.includes(normalizedTeacherNameFilter);
+    if (matchesTeacherName) teacherReportMatchCount += 1;
+    return `<tr data-teacher-report-row data-teacher-search="${escapeHtml(teacherSearch)}" ${matchesTeacherName ? "" : "hidden"}>
+      <td><b>${escapeHtml(teacherName)}</b></td>
+      <td>${formatDate(s.sched_date)}</td>
+      <td><b>${formatTime(s.start_time)} – ${formatTime(s.end_time)}</b></td>
+      <td>${escapeHtml(getBranch(s.branch_id)?.name || "?")}</td>
+      <td>${escapeHtml(getSubject(s.subject_id)?.name || "?")}</td>
+      <td><span class="badge badge-green">${teacherTotals.get(s.teacher_id)}</span></td>
+    </tr>`;
+  }).join("");
 
   let grandTotal = 0;
   let hasMissingRate = false;
@@ -1892,6 +2084,33 @@ function report(view) {
   const branchOptions = DB.branches
     .map((b) => `<option value="${b.id}" ${reportBranchFilter === b.id ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
     .join("");
+  const selectedTeacherBranchIds = reportTeacherBranchFilters === null
+    ? new Set(DB.branches.map((branch) => branch.id))
+    : new Set(reportTeacherBranchFilters);
+  const selectedTeacherBranches = DB.branches.filter((branch) => selectedTeacherBranchIds.has(branch.id));
+  const teacherBranchFilterLabel = reportTeacherBranchFilters === null
+    ? "Tất cả chi nhánh"
+    : selectedTeacherBranches.length === 0
+      ? "Chưa chọn chi nhánh"
+      : selectedTeacherBranches.length === 1
+        ? selectedTeacherBranches[0].name
+        : `${selectedTeacherBranches.length} chi nhánh`;
+  const teacherBranchCheckboxes = DB.branches.map((branch) => `<label class="report-branch-check">
+    <input type="checkbox" name="report-teacher-branch" value="${branch.id}" ${selectedTeacherBranchIds.has(branch.id) ? "checked" : ""}>
+    <span><i class="ti ti-building-community"></i>${escapeHtml(branch.name)}</span>
+  </label>`).join("");
+  const teacherBranchMultiFilter = `<details class="report-branch-multiselect">
+    <summary class="form-control"><i class="ti ti-building-community"></i><span>${escapeHtml(teacherBranchFilterLabel)}</span><i class="ti ti-chevron-down"></i></summary>
+    <div class="report-branch-panel">
+      <div class="report-branch-panel-head"><b>Chọn chi nhánh</b><span>Có thể chọn nhiều</span></div>
+      <div class="report-branch-check-list">${teacherBranchCheckboxes || '<div class="stat-sub">Chưa có chi nhánh</div>'}</div>
+      <div class="report-branch-panel-actions">
+        <button type="button" class="btn btn-sm btn-outline" onclick="setAllTeacherReportBranchCheckboxes(false)">Bỏ chọn</button>
+        <button type="button" class="btn btn-sm btn-outline" onclick="setAllTeacherReportBranchCheckboxes(true)">Chọn tất cả</button>
+        <button type="button" class="btn btn-sm btn-primary" onclick="applyTeacherReportBranchFilters()">Áp dụng</button>
+      </div>
+    </div>
+  </details>`;
   const reportTabs = reportViewTabs(view);
 
   return `
@@ -1900,16 +2119,23 @@ function report(view) {
         <div class="page-title">${REPORT_VIEW_LABELS[view]} · Tháng ${reportMonth}/${reportYear}</div>
         <div class="page-desc">Chi tiết ngày dạy, giờ dạy, số tiết thực tế và lương thực nhận. Một tiết được ghi nhận khi giáo viên bấm “Xong ca”.</div>
       </div>
+      <button type="button" class="btn btn-outline" onclick="exportReportExcel('${view}')"><i class="ti ti-file-spreadsheet"></i> Xuất Excel</button>
     </div>
     <div class="report-view-tabs">${reportTabs}</div>
-    <div class="filter-bar">
+    <div class="filter-bar ${view === "teacher" && isAdmin() ? "report-filter-layer" : ""}">
       <select class="form-control" style="max-width:130px" onchange="reportMonth=Number(this.value); renderPage(currentPage)">${monthOptions}</select>
       <select class="form-control" style="max-width:110px" onchange="reportYear=Number(this.value); renderPage(currentPage)">${yearOptions}</select>
       ${
         isAdmin()
-          ? `<select class="form-control" style="max-width:240px" onchange="reportBranchFilter=this.value; renderPage(currentPage)">
-              <option value="">Tất cả chi nhánh</option>${branchOptions}
-            </select>`
+          ? view === "teacher"
+            ? `${teacherBranchMultiFilter}
+              <div class="search-wrap report-teacher-search">
+                <i class="ti ti-search"></i>
+                <input class="search-input" type="search" value="${escapeHtml(reportTeacherNameFilter)}" placeholder="Tìm theo tên giáo viên..." oninput="filterTeacherReportRows(this.value)" onkeydown="if(event.key==='Enter') event.preventDefault()">
+              </div>`
+            : `<select class="form-control" style="max-width:240px" onchange="reportBranchFilter=this.value; renderPage(currentPage)">
+                <option value="">Tất cả chi nhánh</option>${branchOptions}
+              </select>`
           : ""
       }
     </div>
@@ -1923,10 +2149,11 @@ function report(view) {
 
     ${view === "teacher" ? `<div class="card">
       <div class="card-header"><div><div class="card-title">Báo cáo theo giáo viên</div><div class="card-subtitle">Chi tiết từng ngày và giờ dạy đã hoàn thành</div></div></div>
-      ${teacherReportRows ? `<div class="table-wrap"><table>
+      ${teacherReportRows ? `<div class="table-wrap" id="teacher-report-table-wrap" ${teacherReportMatchCount ? "" : "hidden"}><table>
         <thead><tr><th>Giáo viên</th><th>Ngày dạy</th><th>Giờ ca dạy</th><th>Chi nhánh</th><th>Môn học</th><th>Tổng tiết tháng</th></tr></thead>
         <tbody>${teacherReportRows}</tbody>
-      </table></div>` : `<div class="empty-state"><i class="ti ti-user-check"></i><p>Chưa có tiết đã hoàn thành trong tháng</p></div>`}
+      </table></div>` : ""}
+      <div class="empty-state" id="teacher-report-empty" ${teacherReportMatchCount ? "hidden" : ""}><i class="ti ti-user-check"></i><p id="teacher-report-empty-message">${normalizedTeacherNameFilter ? "Không tìm thấy giáo viên phù hợp" : "Chưa có tiết đã hoàn thành trong tháng"}</p></div>
     </div>` : ""}
 
     ${view === "salary" ? `<div class="card">

@@ -172,6 +172,31 @@ body.logged-out .page-content {
   display: flex; align-items: center; justify-content: center;
   font-size: 18px; color: #fff;
 }
+.logo-image {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  overflow: hidden;
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, .16);
+}
+.logo-image img {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 90px;
+  max-width: none;
+  height: auto;
+  transform: translate(-50%, -50%);
+}
+.login-brand .logo-image {
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+}
+.login-brand .logo-image img { width: 122px; }
 .logo-text {
   font-family: 'Playfair Display', serif;
   font-size: 20px;
@@ -1296,6 +1321,51 @@ select.form-control { cursor: pointer; }
   display: flex; flex-wrap: wrap; gap: 8px;
   margin-bottom: 14px;
 }
+.report-branch-multiselect { position: relative; z-index: 90; width: min(280px, 100%); }
+.report-filter-layer { position: relative; z-index: 100; }
+.report-teacher-search { flex: 1 1 240px; min-width: 220px; max-width: 360px; }
+.report-branch-multiselect > summary {
+  display: flex; align-items: center; gap: 8px; min-height: 38px;
+  list-style: none; cursor: pointer; user-select: none;
+}
+.report-branch-multiselect > summary::-webkit-details-marker { display: none; }
+.report-branch-multiselect > summary > i:first-child { color: var(--accent); font-size: 16px; }
+.report-branch-multiselect > summary > span {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.report-branch-multiselect > summary > i:last-child { color: var(--text3); transition: transform .15s; }
+.report-branch-multiselect[open] > summary { border-color: var(--accent); }
+.report-branch-multiselect[open] > summary > i:last-child { transform: rotate(180deg); }
+.report-branch-panel {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 80;
+  width: max(100%, 320px); padding: 12px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); box-shadow: 0 12px 28px rgba(34, 48, 40, .14);
+}
+.report-branch-panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; }
+.report-branch-panel-head b { font-size: 12.5px; }
+.report-branch-panel-head span { color: var(--text3); font-size: 10.5px; }
+.report-branch-check-list { display: grid; gap: 5px; max-height: 230px; overflow-y: auto; }
+.report-branch-check {
+  display: flex; align-items: center; gap: 9px; min-height: 38px; padding: 7px 9px;
+  border: 1px solid transparent; border-radius: var(--radius-sm); cursor: pointer;
+}
+.report-branch-check:hover { background: var(--surface2); }
+.report-branch-check:has(input:checked) { border-color: #c9ddcf; background: var(--accent-light); }
+.report-branch-check input {
+  width: 17px; height: 17px; margin: 0; flex: none;
+  accent-color: var(--accent); cursor: pointer;
+}
+.report-branch-check span {
+  display: flex; align-items: center; gap: 8px; flex: 1;
+  color: var(--text2); font-size: 12.5px;
+}
+.report-branch-check input:checked + span { color: var(--accent-text); font-weight: 500; }
+.report-branch-check input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.report-branch-panel-actions {
+  display: flex; justify-content: flex-end; gap: 6px;
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
+}
 .report-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
@@ -1403,6 +1473,11 @@ select.form-control { cursor: pointer; }
   .report-view-tabs::-webkit-scrollbar { display: none; }
   .report-view-tabs .btn { flex: none; }
   .report-filters { grid-template-columns: 1fr 1fr; }
+  .report-branch-multiselect { width: 100%; }
+  .report-teacher-search { width: 100%; max-width: none; min-width: 0; }
+  .report-branch-panel { width: 100%; min-width: 0; }
+  .report-branch-panel-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .report-branch-panel-actions .btn:last-child { grid-column: 1 / -1; }
   .report-summary { grid-template-columns: 1fr 1fr; }
   .report-summary .stat-value { font-size: 14px !important; }
   .report-summary .stat-card  { padding: 10px 12px; }
