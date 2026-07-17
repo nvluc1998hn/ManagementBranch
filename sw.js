@@ -1,7 +1,7 @@
 // Service worker — cache-first cho app shell.
 // BUMP version này (edubranch-v2, ...) mỗi khi sửa index.html/app.js/data.js/style.css
-const CACHE_NAME = "edubranch-v24";
-const PRECACHE = ["/", "index.html", "app.js?v=24", "data.js?v=24", "style.css?v=24", "assets/tnl-logo.jpg"];
+const CACHE_NAME = "edubranch-v25";
+const PRECACHE = ["/", "index.html", "app.js?v=25", "data.js?v=25", "style.css?v=25", "assets/tnl-logo.jpg"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(

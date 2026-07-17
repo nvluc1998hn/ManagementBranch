@@ -1366,6 +1366,23 @@ select.form-control { cursor: pointer; }
   display: flex; justify-content: flex-end; gap: 6px;
   margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border);
 }
+
+.schedule-status-override {
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid #e7c997;
+  border-radius: var(--radius-sm);
+  background: #fffaf0;
+}
+.schedule-status-override-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.schedule-status-override-head .form-label { margin-bottom: 3px; color: #79551f; }
+.schedule-status-override-head > i { color: #b87820; font-size: 20px; }
 .report-summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));

@@ -1419,6 +1419,23 @@ function openScheduleModal(id, dateStr) {
     .map((b) => `<option value="${b.id}" ${selectedBranch === b.id ? "selected" : ""}>${escapeHtml(b.name)}</option>`)
     .join("");
   const referenceDate = s?.sched_date || dateStr || toDateStr(schedWeekStartDate);
+  const isPastSchedule = Boolean(s && s.sched_date < todayStr());
+  const pastScheduleStatus = s?.status === "completed" ? "completed" : "scheduled";
+  const adminPastStatusField = isAdmin() && isPastSchedule
+    ? `<div class="schedule-status-override">
+        <div class="schedule-status-override-head">
+          <div>
+            <label class="form-label" for="sc-admin-status">Trạng thái ca đã qua</label>
+            <div class="form-hint">Dùng khi giáo viên quên điểm danh. Ca “Đã dạy” sẽ được tính vào tổng tiết và lương tháng.</div>
+          </div>
+          <i class="ti ti-shield-check"></i>
+        </div>
+        <select class="form-control" id="sc-admin-status">
+          <option value="scheduled" ${pastScheduleStatus === "scheduled" ? "selected" : ""}>Không dạy / chưa ghi nhận</option>
+          <option value="completed" ${pastScheduleStatus === "completed" ? "selected" : ""}>Đã dạy — admin xác nhận</option>
+        </select>
+      </div>`
+    : "";
   const referenceDay = new Date(referenceDate + "T00:00:00").getDay();
   const defaultWeekday = referenceDay === 0 ? 6 : referenceDay - 1;
   const weekdayPicker = s
@@ -1453,6 +1470,7 @@ function openScheduleModal(id, dateStr) {
         <label class="form-label">${s ? "Ngày dạy" : "Tuần áp dụng (chọn một ngày trong tuần)"} *</label>
         ${dmyDateField("sc-date", referenceDate)}
       </div>
+      ${adminPastStatusField}
       ${weekdayPicker}
       <div class="form-row">
         <div class="form-group">
@@ -1494,6 +1512,7 @@ function schedModalBranchChanged(subjectId, teacherId) {
 
 async function saveSchedule(e, id) {
   e.preventDefault();
+  const existingSchedule = id ? DB.schedules.find((schedule) => schedule.id === id) : null;
   const start = document.getElementById("sc-start").value;
   const end = document.getElementById("sc-end").value;
   if (end <= start) {
@@ -1519,10 +1538,32 @@ async function saveSchedule(e, id) {
     end_time: end,
     note: document.getElementById("sc-note").value.trim() || null,
   };
+  const adminStatusSelect = document.getElementById("sc-admin-status");
+  let adminStatusChanged = false;
+  if (adminStatusSelect) {
+    if (!isAdmin() || !existingSchedule || existingSchedule.sched_date >= todayStr()) {
+      showToast("Chỉ admin mới được cập nhật trạng thái ca đã qua", "error");
+      return;
+    }
+    if (dateValue >= todayStr() && adminStatusSelect.value !== existingSchedule.status) {
+      showToast("Chỉ có thể xác nhận trạng thái cho ngày đã qua", "error");
+      return;
+    }
+    if (adminStatusSelect.value !== existingSchedule.status) {
+      adminStatusChanged = true;
+      commonFields.status = adminStatusSelect.value;
+      commonFields.checked_in_at = null;
+      commonFields.completed_at = null;
+    }
+  }
   try {
     if (id) {
       await dbUpdateSchedule(id, { ...commonFields, sched_date: dateValue });
-      showToast("Đã cập nhật ca dạy");
+      showToast(adminStatusChanged
+        ? adminStatusSelect.value === "completed"
+          ? "Đã xác nhận ca này là Đã dạy"
+          : "Đã cập nhật ca này là Không dạy"
+        : "Đã cập nhật ca dạy");
     } else {
       const weekdayIndexes = [...document.querySelectorAll('input[name="sc-weekday"]:checked')]
         .map((x) => Number(x.value));
